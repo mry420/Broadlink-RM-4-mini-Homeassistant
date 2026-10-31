@@ -411,3 +411,4 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+.status-box code { font: 0.75rem ui-monospace, Menlo, Consolas, monospace; padding: 0.05rem 0.3rem; border-radius: 5px; background: var(--ha-bg); word-break: break-all; }

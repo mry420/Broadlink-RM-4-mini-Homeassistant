@@ -271,7 +271,7 @@ def install_state() -> Dict[str, Any]:
     if not config_dir:
         message = "Kein Zugriff auf den HA-Konfigurationsordner."
     elif not sdir:
-        message = "SmartIR ist nicht installiert (über HACS installieren)."
+        message = "SmartIR ist nicht installiert (in HACS als benutzerdefiniertes Repository hinzufügen)."
     else:
         message = "SmartIR gefunden."
     return {"ha_config": bool(config_dir), "smartir": bool(sdir), "message": message}

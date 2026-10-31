@@ -66,7 +66,12 @@ Die Skripte lassen sich danach in Dashboards (Button-Karte) oder Automationen ve
 Home-Assistant-Entitäten, z. B. `media_player.tv` mit Ein/Aus, Lautstärke und
 Quellenwahl oder `light.led_strip` mit Helligkeit. Diese App liefert die Codes dafür.
 
-**Einmalig:** SmartIR über **HACS** installieren (Suche „SmartIR“) und HA neu starten.
+**Einmalig SmartIR installieren** – es steht nicht in der normalen HACS-Suche:
+
+1. **HACS** öffnen → **⋮** oben rechts → **Benutzerdefinierte Repositories**
+2. Repository: `https://github.com/smartHomeHub/SmartIR`, Typ: **Integration** → **Hinzufügen**
+3. In HACS nach **SmartIR** suchen → **Herunterladen**
+4. Home Assistant neu starten
 
 ### Gerät aus der Datenbank übernehmen
 

@@ -669,7 +669,7 @@
       html = "Kein Zugriff auf den HA-Konfigurationsordner. Lade die JSON-Datei herunter und lege sie selbst ab.";
     } else if (!install.smartir) {
       tone = "warn";
-      html = 'SmartIR ist in Home Assistant noch nicht installiert. Installiere es über <strong>HACS</strong> (Suche „SmartIR“) und starte HA neu.';
+      html = 'SmartIR ist noch nicht installiert. Es steht <strong>nicht</strong> in der HACS-Suche – so geht’s: HACS → ⋮ oben rechts → <strong>Benutzerdefinierte Repositories</strong> → <code>https://github.com/smartHomeHub/SmartIR</code>, Typ <strong>Integration</strong> → Hinzufügen. Danach „SmartIR“ suchen, herunterladen und HA neu starten.';
     } else if (install.installed && config.installed) {
       tone = "ok";
       html = `<strong>Installiert</strong> als Code ${config.code}. Änderungen werden automatisch übernommen – nach dem ersten Mal YAML einfügen und HA neu starten.`;
