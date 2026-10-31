@@ -315,6 +315,14 @@ body {
 
 .btn-xs { min-height: 2rem; padding: 0 0.6rem; font-size: 0.75rem; }
 
+/* ---------- Home Assistant ---------- */
+.ha-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--ha-muted); }
+.ha-btn[data-state="ok"] .ha-dot { background: var(--ha-success); box-shadow: 0 0 0 3px rgb(67 160 71 / 0.2); }
+.ha-btn[data-state="warn"] .ha-dot { background: #ffa726; }
+.ha-btn[data-state="off"] .ha-dot { background: var(--ha-border); }
+.ha-btn[data-state="pending"] .ha-dot { animation: pulse 1s ease-in-out infinite; }
+a.icon-btn:hover { color: var(--ha-primary); }
+
 /* ---------- SmartIR card button ---------- */
 .smartir-btn { padding: 0 0.85rem; }
 .smartir-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: var(--ha-border); }

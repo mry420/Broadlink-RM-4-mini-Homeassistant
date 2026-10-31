@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import ha_sync
 import irdb
 import smartir
 
@@ -35,7 +36,7 @@ import smartir
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"
@@ -48,7 +49,7 @@ LEARN_TIMEOUT_MAX = 120
 LEARN_POLL_INTERVAL = 1.0
 LEARNED_CODE_TTL = 15 * 60  # seconds a learned code stays in temporary storage
 MULTI_CODE_DELAY = 0.5  # pause between codes of a multi-code button
-DEFAULT_SETTINGS = {"remote_entity": "remote.rm4_mini"}
+DEFAULT_SETTINGS = {"remote_entity": "remote.rm4_mini", "ha_auto": True}
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -288,6 +289,23 @@ def save_store(data: Dict[str, Any]) -> None:
     tmp = DEVICES_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, DEVICES_FILE)
+    if _ha is not None:
+        _ha.request()  # push the change to Home Assistant (debounced, in the background)
+
+
+def _load_store_locked() -> Dict[str, Any]:
+    with _store_lock:
+        return load_store()
+
+
+def _patch_settings(patch: Dict[str, Any]) -> None:
+    with _store_lock:
+        data = load_store()
+        data["settings"].update(patch)
+        save_store(data)
+
+
+_ha: Optional["ha_sync.HASync"] = None
 
 
 def find_device(data: Dict[str, Any], device_id: str) -> Dict[str, Any]:
@@ -393,7 +411,8 @@ class SaveCommand(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    remote_entity: str = Field(..., max_length=100)
+    remote_entity: Optional[str] = Field(None, max_length=100)
+    ha_auto: Optional[bool] = None
 
 
 class SmartIRConfig(BaseModel):
@@ -741,12 +760,15 @@ def api_get_settings() -> Dict[str, Any]:
 
 @app.put("/api/settings")
 def api_put_settings(body: SettingsUpdate) -> Dict[str, Any]:
-    entity = body.remote_entity.strip()
-    if not _ENTITY_RE.fullmatch(entity):
+    entity = body.remote_entity.strip() if body.remote_entity is not None else None
+    if entity is not None and not _ENTITY_RE.fullmatch(entity):
         raise HTTPException(status_code=400, detail="Ungültige Entität – erwartet z. B. remote.rm4_mini.")
     with _store_lock:
         data = load_store()
-        data["settings"]["remote_entity"] = entity
+        if entity is not None:
+            data["settings"]["remote_entity"] = entity
+        if body.ha_auto is not None:
+            data["settings"]["ha_auto"] = body.ha_auto
         for device in data["devices"]:
             _sync_smartir(device, data)
         save_store(data)
@@ -924,7 +946,7 @@ _BUTTON_NAMES = {
     "vol up": "Lauter", "vol dn": "Leiser", "vol down": "Leiser", "volume up": "Lauter", "volume down": "Leiser",
     "mute": "Stumm", "ch next": "Kanal +", "ch prev": "Kanal −", "ch up": "Kanal +", "ch down": "Kanal −",
     "up": "Hoch", "down": "Runter", "left": "Links", "right": "Rechts", "ok": "OK", "enter": "OK",
-    "menu": "Menü", "back": "Zurück", "exit": "Exit", "source": "Quelle", "input": "Quelle", "info": "Info",
+    "menu": "Menü", "back": "Zurück", "return": "Zurück", "setup": "Einstellungen", "exit": "Exit", "source": "Quelle", "input": "Quelle", "info": "Info",
     "home": "Home", "play": "Play", "pause": "Pause", "stop": "Stop", "next": "Nächster", "prev": "Vorheriger",
     "brightness up": "Heller", "brightness down": "Dunkler", "bright up": "Heller", "bright dn": "Dunkler",
     "speed up": "Stufe +", "speed dn": "Stufe −", "timer": "Timer", "swing": "Swing", "oscillate": "Schwenken",
@@ -1024,6 +1046,32 @@ def api_irdb_import(body: IRDBImport) -> Dict[str, Any]:
         save_store(data)
     log.info("IR-Datenbank: „%s“ mit %d Tasten übernommen (%s).", name, len(device["commands"]), body.path)
     return device
+
+
+# --------------------------------------------------------------------------
+# Home Assistant sync (scripts + remote dashboard)
+# --------------------------------------------------------------------------
+
+_ha = ha_sync.HASync(_load_store_locked, _patch_settings, DATA_DIR / "ha_state.json")
+
+
+@app.get("/api/ha/status")
+def api_ha_status() -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+    views = {d["id"]: f"/{ha_sync.DASHBOARD_URL}/{ha_sync.view_path(d)}" for d in data["devices"] if d.get("commands")}
+    return {**_ha.status, "auto": data["settings"].get("ha_auto", True), "views": views}
+
+
+@app.post("/api/ha/sync")
+def api_ha_sync() -> Dict[str, Any]:
+    try:
+        _ha.sync_now()
+    except ha_sync.HAError as err:
+        _ha.status["error"] = str(err)
+        _ha.status["running"] = False
+        raise HTTPException(status_code=502, detail=str(err)) from err
+    return api_ha_status()
 
 
 def _resync_loop() -> None:

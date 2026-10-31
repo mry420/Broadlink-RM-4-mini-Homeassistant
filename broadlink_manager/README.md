@@ -6,6 +6,8 @@ mit einem **Broadlink RM4 mini** – direkt in der HA-Seitenleiste.
 - Beliebig viele Geräte (TV, LED-Strip, Beamer, Soundbar, Klimaanlage …) als Karten
 - „Taste anlernen“ mit Countdown, danach Namen vergeben und speichern
 - „Senden“-Button neben jeder Taste zum direkten Testen
+- **Automatisch in Home Assistant:** jede Taste wird sofort ein Skript, und im Dashboard
+  **„Fernbedienungen“** entsteht pro Gerät eine passende Universal-Fernbedienung
 - YAML-Export: fertige Skripte (`remote.send_command`) und `switch`-Entitäten
 - **SmartIR-Assistent:** macht aus deinen Tasten echte HA-Geräte (Media Player, Licht)
   und installiert die Code-Datei per Knopfdruck
@@ -61,6 +63,27 @@ RM4 mini über die **Broadlink-Integration** in HA eingerichtet ist.
   Richtungen verwendet. Einfügen in `configuration.yaml`, danach HA neu starten.
 
 Die Skripte lassen sich danach in Dashboards (Button-Karte) oder Automationen verwenden.
+
+## Automatisch in Home Assistant – Universal-Fernbedienung
+
+Sobald du ein Gerät übernimmst oder eine Taste anlernst, legt die App alles in
+Home Assistant an – ohne YAML und ohne Neustart:
+
+- **Ein Skript pro Taste**, z. B. `script.ir_acer_beamer_power`. Nutzbar in Automationen,
+  Szenen, Sprachassistenten und Dashboards.
+- **Dashboard „Fernbedienungen“** in der Seitenleiste mit einem Tab pro Gerät, aufgebaut
+  wie eine echte Fernbedienung: Power und Quelle oben, Steuerkreuz mit OK, Lautstärke-
+  und Kanalwippe, Zifferntasten, Quellen und alle weiteren Tasten.
+- Änderungen (neue Taste, Taste oder Gerät gelöscht) werden automatisch nachgezogen.
+- Auf jeder Gerätekarte öffnet das Fernbedienungs-Symbol direkt die passende Ansicht.
+
+**Voraussetzung:** Der RM4 mini ist in Home Assistant über die **Broadlink-Integration**
+eingerichtet (Einstellungen → Geräte & Dienste – er wird meist automatisch als „Entdeckt“
+angezeigt). Die App erkennt die Broadlink-Fernbedienung selbst; unter **Home Assistant**
+oben in der App siehst du den Status und kannst die Automatik abschalten.
+
+> Das Dashboard und die Skripte mit dem Präfix `ir_` werden von der App verwaltet –
+> Änderungen bitte in der App vornehmen, sonst werden sie beim nächsten Abgleich überschrieben.
 
 ## IR-Datenbank – Fernbedienungen ohne Anlernen
 
@@ -155,6 +178,8 @@ Tastendruck den kompletten Zustand, dafür kommt später ein eigener Assistent.
 | GET    | `/api/smartir/catalog?type=media_player` | SmartIR-Datenbank (nur Broadlink) |
 | POST   | `/api/smartir/test`       | Code aus der Datenbank testweise senden |
 | POST   | `/api/smartir/import`     | Code aus der Datenbank als Gerät übernehmen |
+| GET    | `/api/ha/status`          | Status der Home-Assistant-Synchronisierung |
+| POST   | `/api/ha/sync`            | Skripte und Dashboard sofort abgleichen |
 | GET    | `/api/irdb/categories`    | Kategorien der IR-Datenbank |
 | GET    | `/api/irdb/search?q=&category=` | Fernbedienungen suchen |
 | GET    | `/api/irdb/remote?path=`  | Tasten einer Fernbedienung |

@@ -32,6 +32,7 @@
     types: null,
     smartir: { deviceId: null, view: null, saving: null },
     db: { type: "media_player", cache: {}, selected: null },
+    ha: null,
     irdb: { categories: null, icons: {}, results: [], selected: null, buttons: [], timer: null, seq: 0 },
   };
 
@@ -153,6 +154,7 @@
       const data = await api("api/devices");
       state.devices = data.devices || [];
       if (data.settings) state.settings = data.settings;
+      if (state.ha && state.ha.available) scheduleHaRefresh();
       render();
     } catch (err) {
       $("#loading").textContent = `Geräte konnten nicht geladen werden: ${err.message}`;
@@ -173,6 +175,10 @@
       const commands = device.commands || [];
       $(".device-count", card).textContent = commands.length === 1 ? "1 Taste" : `${commands.length} Tasten`;
       $(".no-commands", card).classList.toggle("hidden", commands.length > 0);
+      const view = state.ha && state.ha.available && state.ha.views && state.ha.views[device.id];
+      const haLink = $(".ha-link", card);
+      haLink.classList.toggle("hidden", !view);
+      if (view) haLink.href = view;
       const sir = device.smartir;
       const sirBtn = $(".smartir-btn", card);
       sirBtn.dataset.state = sir ? (sir.installed ? "installed" : "configured") : "none";
@@ -527,6 +533,98 @@
     } finally {
       button.disabled = !state.db.selected;
     }
+  }
+
+  // ------------------------------------------------------------------ Home Assistant
+
+  let haTimer = null;
+
+  async function refreshHa() {
+    try {
+      state.ha = await api("api/ha/status");
+    } catch (_) {
+      state.ha = null;
+    }
+    renderHa();
+    render();
+    clearTimeout(haTimer);
+    if (state.ha && state.ha.running) haTimer = setTimeout(refreshHa, 1500);
+  }
+
+  function scheduleHaRefresh() {
+    clearTimeout(haTimer);
+    haTimer = setTimeout(refreshHa, 2500); // sync runs debounced in the background
+  }
+
+  function renderHa() {
+    const ha = state.ha;
+    const btn = $("#btn-ha");
+    const box = $("#ha-status");
+    let tone = "info";
+    let html;
+    if (!ha || !ha.available) {
+      btn.dataset.state = "off";
+      html = "Kein Zugriff auf die Home-Assistant-API. Die App läuft vermutlich außerhalb von Home Assistant.";
+      tone = "warn";
+    } else if (ha.error) {
+      btn.dataset.state = "warn";
+      tone = "warn";
+      html = `<strong>Fehler:</strong> ${escapeHtml(ha.error)}`;
+    } else if (!ha.auto) {
+      btn.dataset.state = "off";
+      html = "Automatisches Anlegen ist ausgeschaltet.";
+    } else if (!ha.remote_ok) {
+      btn.dataset.state = "warn";
+      tone = "warn";
+      html = "Keine <strong>Broadlink</strong>-Fernbedienung in Home Assistant gefunden. Die Skripte sind angelegt, senden aber erst, wenn die Broadlink-Integration eingerichtet ist: <em>Einstellungen → Geräte &amp; Dienste → Integration hinzufügen → Broadlink</em>. Meist wird der RM4 mini dort schon als „Entdeckt“ angezeigt.";
+    } else if (ha.running) {
+      btn.dataset.state = "pending";
+      html = "Synchronisiere …";
+    } else {
+      btn.dataset.state = "ok";
+      tone = "ok";
+      const time = ha.last_sync ? new Date(ha.last_sync).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) : "–";
+      html = `<strong>Verbunden.</strong> ${ha.scripts} Skripte über <code>${escapeHtml(ha.remote_entity || "")}</code> · zuletzt ${time}`;
+    }
+    box.dataset.tone = tone;
+    box.innerHTML = html;
+    const select = $("#ha-remote");
+    select.replaceChildren();
+    const options = new Set([...(ha && ha.broadlink_remotes) || [], state.settings.remote_entity]);
+    for (const entity of options) {
+      if (entity) select.appendChild(new Option(entity, entity, false, entity === ((ha && ha.remote_entity) || state.settings.remote_entity)));
+    }
+    $("#ha-auto").checked = !ha || ha.auto !== false;
+    $("#ha-auto").disabled = !ha || !ha.available;
+    $("#ha-sync").disabled = !ha || !ha.available;
+  }
+
+  function bindHaEvents() {
+    $("#btn-ha").addEventListener("click", () => { renderHa(); openModal("#modal-ha"); refreshHa(); });
+    $("#ha-remote").addEventListener("change", async () => {
+      try {
+        state.settings = await api("api/settings", { method: "PUT", body: { remote_entity: $("#ha-remote").value } });
+        scheduleHaRefresh();
+      } catch (err) { toast(err.message, "error"); }
+    });
+    $("#ha-auto").addEventListener("change", async () => {
+      try {
+        state.settings = await api("api/settings", { method: "PUT", body: { ha_auto: $("#ha-auto").checked } });
+        scheduleHaRefresh();
+      } catch (err) { toast(err.message, "error"); }
+    });
+    $("#ha-sync").addEventListener("click", async () => {
+      const button = $("#ha-sync");
+      button.disabled = true;
+      $("#ha-status").innerHTML = "Synchronisiere …";
+      try {
+        state.ha = await api("api/ha/sync", { method: "POST" });
+        toast("Home Assistant aktualisiert", "success");
+      } catch (err) {
+        toast(err.message, "error");
+      }
+      await refreshHa();
+    });
   }
 
   // ------------------------------------------------------------------ IR database (Flipper-IRDB)
@@ -945,6 +1043,7 @@
     });
     $$("#db-selected [data-test]").forEach((b) => b.addEventListener("click", () => testDbCode(b)));
     bindSmartirEvents();
+    bindHaEvents();
     $("#btn-new-device").addEventListener("click", openNewDevice);
     $$("[data-action=new-device]").forEach((b) => b.addEventListener("click", openNewDevice));
     $("#form-device").addEventListener("submit", createDevice);
@@ -1036,5 +1135,6 @@
     bindEvents();
     loadDevices();
     refreshStatus();
+    refreshHa();
   });
 })();

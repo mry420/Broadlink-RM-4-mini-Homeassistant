@@ -30,6 +30,10 @@
       </button>
 
       <div class="flex w-full gap-2 sm:w-auto">
+        <button id="btn-ha" type="button" class="btn btn-secondary ha-btn" data-state="pending" title="Home Assistant">
+          <span class="ha-dot" aria-hidden="true"></span>
+          <span class="hidden sm:inline">Home Assistant</span><span class="sm:hidden">HA</span>
+        </button>
         <button id="btn-export" type="button" class="btn btn-secondary flex-1 sm:flex-none">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg>
           YAML-Export
@@ -69,6 +73,9 @@
           <h3 class="device-name truncate font-semibold"></h3>
           <p class="device-count text-xs text-ha-muted"></p>
         </div>
+        <a class="icon-btn ha-link hidden" target="_top" title="Fernbedienung in Home Assistant öffnen" aria-label="Fernbedienung in Home Assistant öffnen">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="7" r="1.6"/><path d="M10 12h4M10 15.5h4"/></svg>
+        </a>
         <button type="button" class="icon-btn" data-action="delete-device" title="Gerät löschen" aria-label="Gerät löschen">
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>
         </button>
@@ -324,6 +331,31 @@
           <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg>
           <span>In Zwischenablage kopieren</span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Home Assistant -->
+  <div id="modal-ha" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-ha-title">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel" tabindex="-1">
+      <div class="flex items-center gap-3">
+        <h2 id="modal-ha-title" class="flex-1 text-lg font-semibold">Home Assistant</h2>
+        <button type="button" class="icon-btn" data-close aria-label="Schließen">
+          <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <p class="mt-2 text-sm text-ha-muted">Für jede Taste legt die App automatisch ein Skript an und baut im Dashboard <strong class="text-ha-text">„Fernbedienungen“</strong> eine passende Fernbedienung pro Gerät.</p>
+      <div id="ha-status" class="status-box mt-4"></div>
+      <label class="mt-4 block text-sm text-ha-muted" for="ha-remote">Broadlink-Fernbedienung in Home Assistant</label>
+      <select id="ha-remote" class="input select mt-1"></select>
+      <label class="mt-4 flex cursor-pointer items-center gap-3 text-sm">
+        <input id="ha-auto" type="checkbox" class="h-4 w-4 accent-[#03a9f4]">
+        Geräte automatisch in Home Assistant anlegen
+      </label>
+      <div class="mt-6 flex flex-wrap justify-end gap-2">
+        <button type="button" id="ha-sync" class="btn btn-ghost">Jetzt synchronisieren</button>
+        <a id="ha-open" class="btn btn-primary" target="_top" href="/ir-fernbedienungen">Fernbedienungen öffnen</a>
       </div>
     </div>
   </div>

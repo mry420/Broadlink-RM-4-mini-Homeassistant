@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0
+
+- Geräte landen automatisch in Home Assistant: ein Skript pro Taste (über die
+  HA-Konfigurations-API, ohne YAML und ohne Neustart)
+- Neues Dashboard „Fernbedienungen“ mit einer Universal-Fernbedienung pro Gerät
+  (Power, Steuerkreuz, Lautstärke-/Kanalwippe, Ziffern, Quellen, weitere Tasten)
+- Änderungen und gelöschte Geräte werden automatisch abgeglichen
+- Broadlink-Fernbedienung in HA wird automatisch erkannt
+- Neuer Bereich „Home Assistant“ in der App mit Status und Einstellungen
+
 ## 1.2.0
 
 - IR-Datenbank: rund 8.900 Fernbedienungen (Flipper-IRDB) durchsuchen, jede Taste
