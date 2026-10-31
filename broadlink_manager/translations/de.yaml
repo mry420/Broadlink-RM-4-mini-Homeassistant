@@ -1,0 +1,7 @@
+configuration:
+  broadlink_ip:
+    name: IP-Adresse
+    description: IP-Adresse des Broadlink RM4 mini (am besten im Router fest vergeben), z. B. 192.168.1.50
+  broadlink_mac:
+    name: MAC-Adresse
+    description: MAC-Adresse des RM4 mini, z. B. AA:BB:CC:DD:EE:FF. Wird als Fallback für die Verbindung und für den YAML-Export genutzt.

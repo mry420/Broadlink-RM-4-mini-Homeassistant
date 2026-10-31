@@ -1,0 +1,7 @@
+configuration:
+  broadlink_ip:
+    name: IP address
+    description: IP address of the Broadlink RM4 mini (use a fixed DHCP lease), e.g. 192.168.1.50
+  broadlink_mac:
+    name: MAC address
+    description: MAC address of the RM4 mini, e.g. AA:BB:CC:DD:EE:FF. Used as a connection fallback and for the YAML export.
