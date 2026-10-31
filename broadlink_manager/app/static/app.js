@@ -32,6 +32,7 @@
     types: null,
     smartir: { deviceId: null, view: null, saving: null },
     db: { type: "media_player", cache: {}, selected: null },
+    irdb: { categories: null, icons: {}, results: [], selected: null, buttons: [], timer: null, seq: 0 },
   };
 
   // ------------------------------------------------------------------ API
@@ -420,6 +421,9 @@
     if (tab === "db") {
       loadCatalog();
       setTimeout(() => $("#db-search").focus(), 50);
+    } else if (tab === "irdb") {
+      initIrdb();
+      setTimeout(() => $("#irdb-search").focus(), 50);
     } else {
       setTimeout(() => $("#device-name").focus(), 50);
     }
@@ -522,6 +526,180 @@
       toast(err.message, "error");
     } finally {
       button.disabled = !state.db.selected;
+    }
+  }
+
+  // ------------------------------------------------------------------ IR database (Flipper-IRDB)
+
+  async function initIrdb() {
+    if (!state.irdb.categories) {
+      try {
+        const data = await api("api/irdb/categories");
+        state.irdb.categories = data.categories;
+        state.irdb.icons = data.icons || {};
+        const select = $("#irdb-category");
+        for (const c of data.categories) {
+          select.appendChild(new Option(`${c.label} (${c.count})`, String(c.id)));
+        }
+      } catch (err) {
+        toast(err.message, "error");
+        return;
+      }
+    }
+    if (!state.irdb.results.length) searchIrdb();
+  }
+
+  function clearIrdbSelection() {
+    state.irdb.selected = null;
+    state.irdb.buttons = [];
+    $("#irdb-selected").classList.add("hidden");
+    $("#irdb-buttons").replaceChildren();
+    updateIrdbCount();
+  }
+
+  function categoryById(id) {
+    return (state.irdb.categories || []).find((c) => c.id === id);
+  }
+
+  async function searchIrdb() {
+    const seq = ++state.irdb.seq;
+    const q = $("#irdb-search").value.trim();
+    const cat = $("#irdb-category").value;
+    const params = new URLSearchParams({ q });
+    if (cat !== "") params.set("category", cat);
+    try {
+      const data = await api(`api/irdb/search?${params}`);
+      if (seq !== state.irdb.seq) return; // a newer search is running
+      state.irdb.results = data.entries;
+      if (state.irdb.selected && !data.entries.some((e) => e.path === state.irdb.selected.path)) clearIrdbSelection();
+      renderIrdbResults(data.total);
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  function renderIrdbResults(total) {
+    const list = $("#irdb-results");
+    list.replaceChildren();
+    const entries = state.irdb.results;
+    if (!entries.length) {
+      list.innerHTML = '<li class="db-empty">Nichts gefunden – andere Schreibweise probieren oder selbst anlernen.</li>';
+      $("#irdb-total").textContent = "";
+      return;
+    }
+    for (const entry of entries) {
+      const li = document.createElement("li");
+      li.className = "db-row";
+      li.setAttribute("role", "option");
+      li.tabIndex = 0;
+      li.innerHTML = '<span class="db-maker"></span><span class="db-models"></span><span class="db-code"></span>';
+      $(".db-maker", li).textContent = entry.brand;
+      $(".db-models", li).textContent = entry.model;
+      if (!entry.curated) {
+        const badge = document.createElement("span");
+        badge.className = "db-badge";
+        badge.textContent = "weitere Quelle";
+        $(".db-models", li).appendChild(badge);
+      }
+      const cat = categoryById(entry.category);
+      $(".db-code", li).textContent = cat ? cat.label : "";
+      const choose = () => selectIrdbRemote(entry);
+      li.addEventListener("click", choose);
+      li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); } });
+      if (state.irdb.selected && state.irdb.selected.path === entry.path) li.setAttribute("aria-selected", "true");
+      list.appendChild(li);
+    }
+    $("#irdb-total").textContent = total > entries.length ? `${entries.length} von ${total} Treffern – Suche verfeinern für mehr.` : `${total} Treffer`;
+  }
+
+  async function selectIrdbRemote(entry) {
+    state.irdb.selected = entry;
+    $$("#irdb-results .db-row").forEach((r, i) => r.setAttribute("aria-selected", String(state.irdb.results[i] && state.irdb.results[i].path === entry.path)));
+    const box = $("#irdb-selected");
+    box.classList.remove("hidden");
+    $("#irdb-buttons").innerHTML = '<li class="text-sm text-ha-muted">Lade Tasten …</li>';
+    $("#irdb-import").disabled = true;
+    const model = entry.model.toLowerCase().startsWith(entry.brand.toLowerCase()) ? entry.model : `${entry.brand} ${entry.model}`;
+    $("#irdb-name").value = model.slice(0, 60);
+    try {
+      const data = await api(`api/irdb/remote?path=${encodeURIComponent(entry.path)}`);
+      if (state.irdb.selected !== entry) return;
+      state.irdb.buttons = data.buttons;
+      renderIrdbButtons();
+      box.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } catch (err) {
+      $("#irdb-buttons").innerHTML = "";
+      toast(err.message, "error");
+    }
+  }
+
+  function renderIrdbButtons() {
+    const list = $("#irdb-buttons");
+    list.replaceChildren();
+    for (const button of state.irdb.buttons) {
+      const li = document.createElement("li");
+      li.className = "irdb-button";
+      li.dataset.supported = String(button.supported);
+      li.title = button.supported ? `${button.name} · ${button.protocol}` : (button.error || "Nicht unterstützt");
+      li.innerHTML = '<label><input type="checkbox"><span></span></label><button type="button" class="irdb-play" aria-label="Testen"><svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15l12-7.5-12-7.5Z"/></svg></button>';
+      const box = $("input", li);
+      box.checked = button.supported;
+      box.disabled = !button.supported;
+      box.dataset.index = button.index;
+      box.addEventListener("change", updateIrdbCount);
+      $("span", li).textContent = button.label;
+      const play = $(".irdb-play", li);
+      play.disabled = !button.supported;
+      play.addEventListener("click", () => testIrdbButton(play, button.index));
+      list.appendChild(li);
+    }
+    updateIrdbCount();
+  }
+
+  function updateIrdbCount() {
+    const boxes = $$("#irdb-buttons input:not(:disabled)");
+    const count = boxes.filter((b) => b.checked).length;
+    $("#irdb-import").disabled = count === 0;
+    $("#irdb-import").textContent = count ? `Übernehmen (${count} Tasten)` : "Übernehmen";
+    $("#irdb-toggle-all").textContent = boxes.length && boxes.every((b) => b.checked) ? "Keine" : "Alle";
+  }
+
+  async function testIrdbButton(button, index) {
+    const entry = state.irdb.selected;
+    if (!entry) return;
+    button.disabled = true;
+    try {
+      await api("api/irdb/send", { method: "POST", body: { path: entry.path, index } });
+      button.classList.add("is-sent");
+      setTimeout(() => button.classList.remove("is-sent"), 900);
+    } catch (err) {
+      toast(err.message, "error");
+      if (err.status === 503) refreshStatus();
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function importFromIrdb(event) {
+    event.preventDefault();
+    const entry = state.irdb.selected;
+    const name = $("#irdb-name").value.trim();
+    if (!entry || !name) return;
+    const indices = $$("#irdb-buttons input:checked").map((b) => Number(b.dataset.index));
+    if (!indices.length) return;
+    const cat = categoryById(entry.category);
+    const icon = (cat && state.irdb.icons[cat.key]) || "remote";
+    const button = $("#irdb-import");
+    button.disabled = true;
+    try {
+      const device = await api("api/irdb/import", { method: "POST", body: { path: entry.path, name, icon, indices } });
+      closeModal("#modal-device");
+      toast(`„${device.name}“ mit ${device.commands.length} Tasten übernommen`, "success");
+      await loadDevices();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      updateIrdbCount();
     }
   }
 
@@ -743,6 +921,9 @@
     const openNewDevice = () => {
       $("#form-device").reset();
       buildIconPicker();
+      clearIrdbSelection();
+      $("#irdb-search").value = "";
+      state.irdb.results = [];
       showDeviceTab("manual");
       openModal("#modal-device");
     };
@@ -750,6 +931,18 @@
     $$("#db-type [data-type]").forEach((b) => b.addEventListener("click", () => { state.db.type = b.dataset.type; loadCatalog(); }));
     $("#db-search").addEventListener("input", renderCatalog);
     $("#form-db").addEventListener("submit", importFromDb);
+    $("#form-irdb").addEventListener("submit", importFromIrdb);
+    $("#irdb-search").addEventListener("input", () => {
+      clearTimeout(state.irdb.timer);
+      state.irdb.timer = setTimeout(searchIrdb, 250);
+    });
+    $("#irdb-category").addEventListener("change", searchIrdb);
+    $("#irdb-toggle-all").addEventListener("click", () => {
+      const boxes = $$("#irdb-buttons input:not(:disabled)");
+      const allOn = boxes.every((b) => b.checked);
+      boxes.forEach((b) => { b.checked = !allOn; });
+      updateIrdbCount();
+    });
     $$("#db-selected [data-test]").forEach((b) => b.addEventListener("click", () => testDbCode(b)));
     bindSmartirEvents();
     $("#btn-new-device").addEventListener("click", openNewDevice);

@@ -28,13 +28,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import irdb
 import smartir
 
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"
@@ -407,6 +408,18 @@ class SmartIRTest(BaseModel):
     type: str
     code: int
     slot: str = "on"
+
+
+class IRDBSend(BaseModel):
+    path: str = Field(..., max_length=400)
+    index: int = Field(..., ge=0)
+
+
+class IRDBImport(BaseModel):
+    path: str = Field(..., max_length=400)
+    name: str = Field(..., min_length=1, max_length=60)
+    icon: str = Field("remote", max_length=30)
+    indices: Optional[List[int]] = None
 
 
 class SmartIRImport(BaseModel):
@@ -899,6 +912,117 @@ def api_smartir_import(body: SmartIRImport) -> Dict[str, Any]:
         )
         save_store(data)
     log.info("SmartIR-Code %s (%s) als „%s“ importiert.", body.code, body.type, name)
+    return device
+
+
+# --------------------------------------------------------------------------
+# Open IR database (Flipper-IRDB)
+# --------------------------------------------------------------------------
+
+_BUTTON_NAMES = {
+    "power": "Power", "on": "An", "off": "Aus", "power on": "An", "power off": "Aus",
+    "vol up": "Lauter", "vol dn": "Leiser", "vol down": "Leiser", "volume up": "Lauter", "volume down": "Leiser",
+    "mute": "Stumm", "ch next": "Kanal +", "ch prev": "Kanal −", "ch up": "Kanal +", "ch down": "Kanal −",
+    "up": "Hoch", "down": "Runter", "left": "Links", "right": "Rechts", "ok": "OK", "enter": "OK",
+    "menu": "Menü", "back": "Zurück", "exit": "Exit", "source": "Quelle", "input": "Quelle", "info": "Info",
+    "home": "Home", "play": "Play", "pause": "Pause", "stop": "Stop", "next": "Nächster", "prev": "Vorheriger",
+    "brightness up": "Heller", "brightness down": "Dunkler", "bright up": "Heller", "bright dn": "Dunkler",
+    "speed up": "Stufe +", "speed dn": "Stufe −", "timer": "Timer", "swing": "Swing", "oscillate": "Schwenken",
+}
+_CATEGORY_ICONS = {"tv": "tv", "projector": "projector", "audio": "soundbar", "video": "receiver",
+                   "light": "led", "ac": "ac", "fan": "fan", "climate": "fan"}
+
+
+def _german_button_name(name: str) -> str:
+    key = re.sub(r"[_\s]+", " ", name.strip()).lower()
+    return _BUTTON_NAMES.get(key, re.sub(r"_+", " ", name).strip())
+
+
+def _irdb_remote(path: str) -> List[Dict[str, Any]]:
+    if not irdb.is_known_path(path):
+        raise HTTPException(status_code=404, detail="Fernbedienung nicht in der Datenbank.")
+    try:
+        return irdb.load_remote(path)
+    except (urllib.error.URLError, OSError) as err:
+        raise HTTPException(status_code=502, detail=f"IR-Datenbank nicht erreichbar: {err}") from err
+
+
+@app.get("/api/irdb/categories")
+def api_irdb_categories() -> Dict[str, Any]:
+    return {"categories": irdb.categories(), "icons": _CATEGORY_ICONS}
+
+
+@app.get("/api/irdb/search")
+def api_irdb_search(q: str = Query("", max_length=100), category: Optional[int] = None) -> Dict[str, Any]:
+    entries, total = irdb.search(q, category)
+    return {"entries": entries, "total": total}
+
+
+@app.get("/api/irdb/remote")
+def api_irdb_remote(path: str = Query(..., max_length=400)) -> Dict[str, Any]:
+    signals = _irdb_remote(path)
+    buttons = [
+        {
+            "index": i,
+            "name": s["name"],
+            "label": _german_button_name(s["name"]),
+            "supported": s["supported"],
+            "protocol": s.get("protocol") or ("Raw" if s.get("type") == "raw" else ""),
+            "error": s.get("error"),
+        }
+        for i, s in enumerate(signals)
+    ]
+    return {"path": path, "buttons": buttons}
+
+
+@app.post("/api/irdb/send")
+def api_irdb_send(body: IRDBSend) -> Dict[str, Any]:
+    signals = _irdb_remote(body.path)
+    if body.index >= len(signals):
+        raise HTTPException(status_code=404, detail="Taste nicht gefunden.")
+    signal = signals[body.index]
+    if not signal["supported"]:
+        raise HTTPException(status_code=400, detail=signal.get("error") or "Signal nicht unterstützt.")
+    client.send(_packets(signal["code"]))
+    log.info("IR-Datenbank: gesendet %s / %s", body.path, signal["name"])
+    return {"ok": True}
+
+
+@app.post("/api/irdb/import")
+def api_irdb_import(body: IRDBImport) -> Dict[str, Any]:
+    signals = _irdb_remote(body.path)
+    wanted = set(body.indices) if body.indices is not None else None
+    name = body.name.strip()
+    with _store_lock:
+        data = load_store()
+        device: Dict[str, Any] = {
+            "id": _unique_id(_slugify(name), [d["id"] for d in data["devices"]]),
+            "name": name,
+            "icon": body.icon,
+            "created": _now(),
+            "source": f"IR-Datenbank: {body.path}",
+            "commands": [],
+        }
+        used_names: List[str] = []
+        for i, signal in enumerate(signals):
+            if not signal["supported"] or (wanted is not None and i not in wanted):
+                continue
+            label = _german_button_name(signal["name"])
+            unique_label, n = label, 2
+            while unique_label.lower() in used_names:
+                unique_label, n = f"{label} {n}", n + 1
+            used_names.append(unique_label.lower())
+            device["commands"].append({
+                "id": _unique_id(_slugify(unique_label), [c["id"] for c in device["commands"]]),
+                "name": unique_label,
+                "code": signal["code"],
+                "created": _now(),
+            })
+        if not device["commands"]:
+            raise HTTPException(status_code=400, detail="Keine Tasten ausgewählt.")
+        data["devices"].append(device)
+        save_store(data)
+    log.info("IR-Datenbank: „%s“ mit %d Tasten übernommen (%s).", name, len(device["commands"]), body.path)
     return device
 
 

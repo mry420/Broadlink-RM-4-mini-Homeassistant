@@ -9,6 +9,8 @@ mit einem **Broadlink RM4 mini** – direkt in der HA-Seitenleiste.
 - YAML-Export: fertige Skripte (`remote.send_command`) und `switch`-Entitäten
 - **SmartIR-Assistent:** macht aus deinen Tasten echte HA-Geräte (Media Player, Licht)
   und installiert die Code-Datei per Knopfdruck
+- **IR-Datenbank mit rund 8.900 Fernbedienungen** (TV, Beamer, Soundbar, LED, Klima,
+  Ventilator …): Hersteller suchen, jede Taste testen, übernehmen – ohne Anlernen
 - **SmartIR-Datenbank:** fertige Codes vieler Marken suchen, testen und übernehmen
 - Läuft komplett lokal (kein Cloud-Dienst, kein CDN)
 
@@ -59,6 +61,25 @@ RM4 mini über die **Broadlink-Integration** in HA eingerichtet ist.
   Richtungen verwendet. Einfügen in `configuration.yaml`, danach HA neu starten.
 
 Die Skripte lassen sich danach in Dashboards (Button-Karte) oder Automationen verwenden.
+
+## IR-Datenbank – Fernbedienungen ohne Anlernen
+
+Unter **Neues Gerät anlegen → IR-Datenbank** findest du rund 8.900 Fernbedienungen
+aus der freien [Flipper-IRDB](https://github.com/Lucaslhm/Flipper-IRDB) (CC0).
+
+1. Kategorie wählen (z. B. **Beamer**) und Hersteller suchen (z. B. „Acer“).
+2. Fernbedienung antippen – alle Tasten erscheinen mit einem **▶**-Testknopf.
+3. Probieren, ob dein Gerät reagiert. Wenn nicht: nächsten Eintrag desselben Herstellers testen.
+4. Gewünschte Tasten anhaken, Namen vergeben, **Übernehmen**.
+
+Die App übersetzt die Codes der Datenbank (NEC, Samsung, Sony SIRC, RC5, RC6,
+Panasonic/Kaseikyo, RCA, Pioneer und Rohdaten) automatisch in das Format des RM4 mini.
+Signale mit 56 kHz Trägerfrequenz (sehr selten) kann der RM4 mini nicht senden – sie
+werden ausgegraut. Das Verzeichnis ist in der App enthalten, die einzelnen Fernbedienungen
+werden bei Bedarf von GitHub geladen (Internetzugang nötig) und zwischengespeichert.
+
+> Die Fernbedienungs-Datenbank der Broadlink-App selbst ist ein geschlossener Cloud-Dienst
+> des Herstellers ohne öffentliche Schnittstelle und kann deshalb nicht eingebunden werden.
 
 ## SmartIR – echte Geräte statt einzelner Tasten
 
@@ -134,8 +155,16 @@ Tastendruck den kompletten Zustand, dafür kommt später ein eigener Assistent.
 | GET    | `/api/smartir/catalog?type=media_player` | SmartIR-Datenbank (nur Broadlink) |
 | POST   | `/api/smartir/test`       | Code aus der Datenbank testweise senden |
 | POST   | `/api/smartir/import`     | Code aus der Datenbank als Gerät übernehmen |
+| GET    | `/api/irdb/categories`    | Kategorien der IR-Datenbank |
+| GET    | `/api/irdb/search?q=&category=` | Fernbedienungen suchen |
+| GET    | `/api/irdb/remote?path=`  | Tasten einer Fernbedienung |
+| POST   | `/api/irdb/send`          | Taste aus der Datenbank testweise senden |
+| POST   | `/api/irdb/import`        | Fernbedienung (oder Auswahl) als Gerät übernehmen |
 
 ## Entwicklung
+
+Das Verzeichnis der IR-Datenbank (`app/data/irdb_index.json.gz`) wird mit
+`tools/irdb/build_index.py` erzeugt (Anleitung im Skript).
 
 Das Frontend nutzt lokal kompiliertes Tailwind (`app/static/tailwind.css`).
 Nach Änderungen an Klassen in `index.html`/`app.js` im Repo-Root neu bauen:

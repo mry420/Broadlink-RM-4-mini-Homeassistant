@@ -400,7 +400,59 @@ body {
 .db-maker { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .db-models { color: var(--ha-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .db-code { color: var(--ha-muted); font: 0.75rem ui-monospace, Menlo, Consolas, monospace; }
+@media (max-width: 520px) {
+  .db-row { grid-template-columns: 1fr auto; row-gap: 0.1rem; }
+  .db-models { grid-column: 1 / -1; grid-row: 2; }
+}
 .db-empty { padding: 1.25rem; text-align: center; color: var(--ha-muted); font-size: 0.875rem; }
+
+/* ---------- IR database ---------- */
+.db-badge {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--ha-elevated);
+  color: var(--ha-muted);
+  font-size: 0.6875rem;
+  font-weight: 400;
+}
+.irdb-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.35rem;
+  max-height: 15rem;
+  overflow-y: auto;
+}
+.irdb-button {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.3rem 0.25rem 0.55rem;
+  border-radius: 9px;
+  border: 1px solid var(--ha-border);
+  background: var(--ha-bg);
+  font-size: 0.8125rem;
+}
+.irdb-button label { display: flex; flex: 1; min-width: 0; align-items: center; gap: 0.45rem; cursor: pointer; }
+.irdb-button label span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.irdb-button input { accent-color: var(--ha-primary); width: 0.95rem; height: 0.95rem; flex-shrink: 0; }
+.irdb-button[data-supported="false"] { opacity: 0.45; }
+.irdb-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 7px;
+  background: rgb(3 169 244 / 0.12);
+  color: var(--ha-primary);
+  cursor: pointer;
+}
+.irdb-play:hover:not(:disabled) { background: rgb(3 169 244 / 0.25); }
+.irdb-play:disabled { cursor: not-allowed; background: transparent; color: var(--ha-muted); }
+.irdb-play.is-sent { background: rgb(67 160 71 / 0.2); color: #66bb6a; }
 
 @keyframes pulse { 50% { opacity: 0.35; } }
 @keyframes ripple {
