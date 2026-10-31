@@ -1,5 +1,5 @@
 name: "Broadlink IR Manager"
-version: "1.0.0"
+version: "1.1.0"
 slug: "broadlink_manager"
 description: "Einfache Benutzeroberfläche zum Anlernen und Verwalten von Broadlink RM4 mini IR-Codes"
 url: "https://github.com/mry420/Broadlink-RM-4-mini-Homeassistant"
@@ -16,6 +16,11 @@ ingress: true
 ingress_port: 8000
 panel_icon: "mdi:remote"
 panel_title: "Broadlink IR"
+# Read/write access to the HA config folder, used only to place SmartIR
+# code files in custom_components/smartir/codes/.
+map:
+  - type: homeassistant_config
+    read_only: false
 options:
   broadlink_ip: ""
   broadlink_mac: ""

@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import unicodedata
+import urllib.error
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -27,11 +28,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import smartir
+
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"
@@ -43,6 +46,8 @@ LEARN_TIMEOUT_DEFAULT = 30
 LEARN_TIMEOUT_MAX = 120
 LEARN_POLL_INTERVAL = 1.0
 LEARNED_CODE_TTL = 15 * 60  # seconds a learned code stays in temporary storage
+MULTI_CODE_DELAY = 0.5  # pause between codes of a multi-code button
+DEFAULT_SETTINGS = {"remote_entity": "remote.rm4_mini"}
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -206,8 +211,11 @@ class BroadlinkClient:
             info["error"] = str(err)
         return info
 
-    def send(self, packet: bytes) -> None:
-        self.call(lambda d: d.send_data(packet))
+    def send(self, packets: List[bytes]) -> None:
+        for index, packet in enumerate(packets):
+            if index:
+                time.sleep(MULTI_CODE_DELAY)
+            self.call(lambda d, p=packet: d.send_data(p))
 
     def learn(self, timeout: float, cancel: threading.Event) -> Optional[bytes]:
         """Enter learning mode and poll check_data() until a code arrives."""
@@ -243,6 +251,8 @@ def _slugify(value: str) -> str:
     replacements = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss", "Ä": "ae", "Ö": "oe", "Ü": "ue"}
     for src, dst in replacements.items():
         value = value.replace(src, dst)
+    value = re.sub(r"\s*\+\s*$", " plus", value)
+    value = re.sub(r"\s*[-−]\s*$", " minus", value)
     value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode()
     value = re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
     return value or "item"
@@ -257,16 +267,19 @@ def _unique_id(base: str, existing: List[str]) -> str:
 
 
 def load_store() -> Dict[str, Any]:
+    data: Dict[str, Any] = {"devices": []}
     try:
-        data = json.loads(DEVICES_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("devices"), list):
-            return data
-        log.warning("%s hat ein unerwartetes Format – starte mit leerer Liste.", DEVICES_FILE)
+        loaded = json.loads(DEVICES_FILE.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict) and isinstance(loaded.get("devices"), list):
+            data = loaded
+        else:
+            log.warning("%s hat ein unerwartetes Format – starte mit leerer Liste.", DEVICES_FILE)
     except FileNotFoundError:
         pass
     except (OSError, ValueError) as err:
         log.error("%s konnte nicht gelesen werden: %s", DEVICES_FILE, err)
-    return {"devices": []}
+    data["settings"] = {**DEFAULT_SETTINGS, **(data.get("settings") or {})}
+    return data
 
 
 def save_store(data: Dict[str, Any]) -> None:
@@ -322,6 +335,25 @@ def _pop_code(learn_id: str) -> Optional[str]:
     return None
 
 
+def _packets(code: Any) -> List[bytes]:
+    """Stored codes are a Base64 string or a list of them (multi-code button)."""
+    return [_decode_code(c) for c in code] if isinstance(code, list) else [_decode_code(code)]
+
+
+def _sync_smartir(device: Dict[str, Any], data: Dict[str, Any]) -> None:
+    """Rewrite an installed SmartIR file after the device's buttons changed."""
+    raw = device.get("smartir")
+    if not raw or not raw.get("installed"):
+        return
+    config = smartir.normalize_config(device, data["devices"], raw)
+    if smartir.missing_required(config):
+        return
+    try:
+        smartir.install(device, config)
+    except (OSError, RuntimeError) as err:
+        log.warning("SmartIR-Datei für %s nicht aktualisiert: %s", device["name"], err)
+
+
 def _decode_code(code: str) -> bytes:
     """Accept base64 (optionally 'b64:' prefixed) or hex IR codes."""
     raw = code.strip()
@@ -355,6 +387,33 @@ class SaveCommand(BaseModel):
     name: str = Field(..., min_length=1, max_length=60)
     learn_id: Optional[str] = None
     code: Optional[str] = None
+    smartir_slot: Optional[str] = None
+    smartir_source: bool = False
+
+
+class SettingsUpdate(BaseModel):
+    remote_entity: str = Field(..., max_length=100)
+
+
+class SmartIRConfig(BaseModel):
+    type: str
+    code: Optional[int] = None
+    slots: Dict[str, str] = {}
+    sources: List[str] = []
+    brightness_steps: Optional[int] = None
+
+
+class SmartIRTest(BaseModel):
+    type: str
+    code: int
+    slot: str = "on"
+
+
+class SmartIRImport(BaseModel):
+    type: str
+    code: int
+    name: str = Field(..., min_length=1, max_length=60)
+    icon: str = Field("remote", max_length=30)
 
 
 class SendRequest(BaseModel):
@@ -428,6 +487,9 @@ def api_delete_command(device_id: str, command_id: str) -> Dict[str, Any]:
         device = find_device(data, device_id)
         find_command(device, command_id)
         device["commands"] = [c for c in device["commands"] if c["id"] != command_id]
+        if device.get("smartir"):
+            device["smartir"] = smartir.normalize_config(device, data["devices"], device["smartir"])
+        _sync_smartir(device, data)
         save_store(data)
     return {"ok": True}
 
@@ -492,6 +554,18 @@ def api_save_command(body: SaveCommand) -> Dict[str, Any]:
                 "created": _now(),
             }
             commands.append(command)
+        if body.smartir_slot or body.smartir_source:
+            base = device.get("smartir")
+            if not base:  # first use: start from the automatic suggestion
+                type_key = smartir.default_type_for_icon(device.get("icon", ""))
+                base = {"type": type_key, **smartir.suggest_config(device, type_key)}
+            config = smartir.normalize_config(device, data["devices"], base)
+            if body.smartir_slot:
+                config["slots"][body.smartir_slot] = command["id"]
+            if body.smartir_source and command["id"] not in config["sources"]:
+                config["sources"].append(command["id"])
+            device["smartir"] = smartir.normalize_config(device, data["devices"], config)
+        _sync_smartir(device, data)
         save_store(data)
     return {"device_id": device["id"], "command": command}
 
@@ -499,18 +573,18 @@ def api_save_command(body: SaveCommand) -> Dict[str, Any]:
 @app.post("/api/send")
 def api_send(body: SendRequest) -> Dict[str, Any]:
     if body.code:
-        packet = _decode_code(body.code)
+        packets = [_decode_code(body.code)]
         label = "manueller Code"
     elif body.device_id and body.command_id:
         with _store_lock:
             device = find_device(load_store(), body.device_id)
             command = find_command(device, body.command_id)
-        packet = _decode_code(command["code"])
+        packets = _packets(command["code"])
         label = f"{device['name']} / {command['name']}"
     else:
         raise HTTPException(status_code=400, detail="device_id und command_id (oder code) werden benötigt.")
 
-    client.send(packet)
+    client.send(packets)
     log.info("Gesendet: %s", label)
     return {"ok": True, "sent": label}
 
@@ -527,6 +601,16 @@ _TOGGLE_NAMES = {"power", "power toggle", "toggle", "standby", "on/off", "an/aus
 def _q(value: str) -> str:
     """Quote a string for YAML (double-quoted, escaped)."""
     return json.dumps(value, ensure_ascii=False)
+
+
+def _yaml_command(code: Any) -> str:
+    if isinstance(code, list):
+        return "[" + ", ".join(_q("b64:" + c) for c in code) + "]"
+    return _q("b64:" + code)
+
+
+def _first(code: Any) -> str:
+    return code[0] if isinstance(code, list) else code
 
 
 def _norm(name: str) -> str:
@@ -581,7 +665,7 @@ def build_yaml(data: Dict[str, Any], remote_entity: str, mac: str) -> str:
                 "        target:",
                 f"          entity_id: {remote_entity}",
                 "        data:",
-                f"          command: {_q('b64:' + command['code'])}",
+                f"          command: {_yaml_command(command['code'])}",
             ]
     lines.append("")
 
@@ -595,8 +679,8 @@ def build_yaml(data: Dict[str, Any], remote_entity: str, mac: str) -> str:
         on, off = codes
         switch_lines += [
             f"      - name: {_q(device['name'])}",
-            f"        command_on: {_q(on['code'])}",
-            f"        command_off: {_q(off['code'])}",
+            f"        command_on: {_q(_first(on['code']))}",
+            f"        command_off: {_q(_first(off['code']))}",
         ]
 
     lines += [
@@ -617,11 +701,226 @@ def build_yaml(data: Dict[str, Any], remote_entity: str, mac: str) -> str:
 
 @app.get("/api/export/yaml", response_class=PlainTextResponse)
 def api_export_yaml(
-    remote_entity: str = Query("remote.rm4_mini", max_length=100),
+    remote_entity: Optional[str] = Query(None, max_length=100),
 ) -> PlainTextResponse:
-    entity = remote_entity.strip()
+    with _store_lock:
+        settings = load_store()["settings"]
+    entity = (remote_entity or settings["remote_entity"]).strip()
     if not re.fullmatch(r"remote\.[a-z0-9_]+", entity):
         raise HTTPException(status_code=400, detail="Ungültige Entität – erwartet z. B. remote.rm4_mini.")
     with _store_lock:
         data = load_store()
     return PlainTextResponse(build_yaml(data, entity, _format_mac(BROADLINK_MAC)))
+
+
+# --------------------------------------------------------------------------
+# Settings
+# --------------------------------------------------------------------------
+
+_ENTITY_RE = re.compile(r"remote\.[a-z0-9_]+")
+
+
+@app.get("/api/settings")
+def api_get_settings() -> Dict[str, Any]:
+    with _store_lock:
+        return load_store()["settings"]
+
+
+@app.put("/api/settings")
+def api_put_settings(body: SettingsUpdate) -> Dict[str, Any]:
+    entity = body.remote_entity.strip()
+    if not _ENTITY_RE.fullmatch(entity):
+        raise HTTPException(status_code=400, detail="Ungültige Entität – erwartet z. B. remote.rm4_mini.")
+    with _store_lock:
+        data = load_store()
+        data["settings"]["remote_entity"] = entity
+        for device in data["devices"]:
+            _sync_smartir(device, data)
+        save_store(data)
+        return data["settings"]
+
+
+# --------------------------------------------------------------------------
+# SmartIR
+# --------------------------------------------------------------------------
+
+
+def _smartir_view(device: Dict[str, Any], data: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    state = smartir.install_state()
+    path = smartir.code_file_path(config)
+    return {
+        "device_id": device["id"],
+        "config": config,
+        "missing": smartir.missing_required(config),
+        "json": smartir.build_device_json(device, config),
+        "yaml": smartir.build_yaml(device, config, data["settings"]["remote_entity"]),
+        "install": {**state, "path": str(path) if path else None, "installed": smartir.is_installed(config)},
+    }
+
+
+@app.get("/api/smartir/types")
+def api_smartir_types() -> Dict[str, Any]:
+    return {
+        key: {
+            "label": t["label"],
+            "hint": t["hint"],
+            "slots": [{"key": k, "label": label} for k, label in t["slots"]],
+            "digits": [{"key": k, "label": label} for k, label in smartir.DIGIT_SLOTS] if t["has_digits"] else [],
+            "has_sources": t["has_sources"],
+        }
+        for key, t in smartir.TYPES.items()
+    }
+
+
+@app.get("/api/devices/{device_id}/smartir")
+def api_get_smartir(device_id: str, type: Optional[str] = None) -> Dict[str, Any]:  # noqa: A002
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        raw = device.get("smartir")
+        if raw and (type is None or type == raw.get("type")):
+            config = smartir.normalize_config(device, data["devices"], raw)
+        else:
+            type_key = type if type in smartir.TYPES else smartir.default_type_for_icon(device.get("icon", ""))
+            suggestion = smartir.suggest_config(device, type_key)
+            base = {**(raw or {}), "type": type_key, **suggestion}
+            config = smartir.normalize_config(device, data["devices"], base)
+        return _smartir_view(device, data, config)
+
+
+@app.put("/api/devices/{device_id}/smartir")
+def api_put_smartir(device_id: str, body: SmartIRConfig) -> Dict[str, Any]:
+    if body.type not in smartir.TYPES:
+        raise HTTPException(status_code=400, detail="Unbekannter SmartIR-Typ.")
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        if body.code is not None:
+            clash = next((d for d in data["devices"] if d["id"] != device_id
+                          and (d.get("smartir") or {}).get("code") == body.code), None)
+            if clash:
+                raise HTTPException(status_code=409, detail=f"Code {body.code} nutzt bereits „{clash['name']}“.")
+        previous = device.get("smartir") or {}
+        raw = {**body.dict(), "installed": previous.get("installed", False)}
+        config = smartir.normalize_config(device, data["devices"], raw)
+        device["smartir"] = config
+        _sync_smartir(device, data)
+        save_store(data)
+        return _smartir_view(device, data, config)
+
+
+@app.post("/api/devices/{device_id}/smartir/install")
+def api_install_smartir(device_id: str) -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        config = smartir.normalize_config(device, data["devices"], device.get("smartir"))
+        missing = smartir.missing_required(config)
+        if missing:
+            raise HTTPException(status_code=400, detail="Es fehlt noch: " + ", ".join(missing))
+        try:
+            path = smartir.install(device, config)
+        except RuntimeError as err:
+            raise HTTPException(status_code=409, detail=str(err)) from err
+        except OSError as err:
+            raise HTTPException(status_code=500, detail=f"Datei konnte nicht geschrieben werden: {err}") from err
+        config["installed"] = True
+        device["smartir"] = config
+        save_store(data)
+        view = _smartir_view(device, data, config)
+    view["written"] = str(path)
+    return view
+
+
+@app.get("/api/smartir/catalog")
+def api_smartir_catalog(type: str = "media_player") -> Dict[str, Any]:  # noqa: A002
+    try:
+        return {"type": type, "entries": smartir.catalog(type)}
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+    except (urllib.error.URLError, OSError) as err:
+        raise HTTPException(status_code=502, detail=f"SmartIR-Datenbank nicht erreichbar: {err}") from err
+
+
+def _fetch_code_file(type_key: str, code: int) -> Dict[str, Any]:
+    try:
+        return smartir.fetch_code_file(type_key, code)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+    except (urllib.error.URLError, OSError) as err:
+        raise HTTPException(status_code=502, detail=f"Code {code} konnte nicht geladen werden: {err}") from err
+
+
+@app.post("/api/smartir/test")
+def api_smartir_test(body: SmartIRTest) -> Dict[str, Any]:
+    data = _fetch_code_file(body.type, body.code)
+    commands, _steps = smartir.commands_from_code_file(body.type, data)
+    match = next((c for c in commands if c[2] == body.slot), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Dieser Code hat keine passende Taste.")
+    client.send(_packets(match[1]))
+    return {"ok": True}
+
+
+@app.post("/api/smartir/import")
+def api_smartir_import(body: SmartIRImport) -> Dict[str, Any]:
+    if body.type not in smartir.TYPES:
+        raise HTTPException(status_code=400, detail="Unbekannter SmartIR-Typ.")
+    file_data = _fetch_code_file(body.type, body.code)
+    imported, steps = smartir.commands_from_code_file(body.type, file_data)
+    if not imported:
+        raise HTTPException(status_code=400, detail="Die Code-Datei enthält keine nutzbaren Tasten.")
+    name = body.name.strip()
+    with _store_lock:
+        data = load_store()
+        device_id = _unique_id(_slugify(name), [d["id"] for d in data["devices"]])
+        device: Dict[str, Any] = {
+            "id": device_id,
+            "name": name,
+            "icon": body.icon,
+            "manufacturer": file_data.get("manufacturer") or "",
+            "created": _now(),
+            "source": f"SmartIR {body.type} {body.code}",
+            "commands": [],
+        }
+        slots: Dict[str, str] = {}
+        sources: List[str] = []
+        for cmd_name, code, slot, is_source in imported:
+            command_id = _unique_id(_slugify(cmd_name), [c["id"] for c in device["commands"]])
+            device["commands"].append({"id": command_id, "name": cmd_name, "code": code, "created": _now()})
+            if slot:
+                slots[slot] = command_id
+            if is_source:
+                sources.append(command_id)
+        data["devices"].append(device)
+        device["smartir"] = smartir.normalize_config(
+            device, data["devices"],
+            {"type": body.type, "slots": slots, "sources": sources, "brightness_steps": steps},
+        )
+        save_store(data)
+    log.info("SmartIR-Code %s (%s) als „%s“ importiert.", body.code, body.type, name)
+    return device
+
+
+def _resync_loop() -> None:
+    """Restore installed SmartIR files, e.g. after a SmartIR update via HACS."""
+    while True:
+        try:
+            with _store_lock:
+                data = load_store()
+                for device in data["devices"]:
+                    raw = device.get("smartir")
+                    if raw and raw.get("installed"):
+                        config = smartir.normalize_config(device, data["devices"], raw)
+                        path = smartir.code_file_path(config)
+                        if path and not path.exists():
+                            log.info("SmartIR-Datei fehlt (%s) – stelle sie wieder her.", path)
+                            _sync_smartir(device, data)
+        except Exception as err:  # noqa: BLE001 – never let the watcher die
+            log.warning("SmartIR-Prüfung fehlgeschlagen: %s", err)
+        time.sleep(600)
+
+
+@app.on_event("startup")
+def _start_background() -> None:
+    threading.Thread(target=_resync_loop, name="smartir-resync", daemon=True).start()

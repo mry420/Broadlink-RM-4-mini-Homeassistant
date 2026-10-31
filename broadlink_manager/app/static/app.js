@@ -4,6 +4,7 @@
   "use strict";
 
   const LEARN_TIMEOUT = 30;
+  const COLLAPSED_COUNT = 8;
 
   const ICONS = {
     tv: { label: "TV", svg: '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/>' },
@@ -24,8 +25,13 @@
 
   const state = {
     devices: [],
-    learn: { deviceId: null, learnId: null, code: null, controller: null, timer: null },
+    expanded: new Set(),
+    settings: { remote_entity: "remote.rm4_mini" },
+    learn: { deviceId: null, learnId: null, code: null, controller: null, timer: null, slot: null, source: false, presetName: "" },
     confirmAction: null,
+    types: null,
+    smartir: { deviceId: null, view: null, saving: null },
+    db: { type: "media_player", cache: {}, selected: null },
   };
 
   // ------------------------------------------------------------------ API
@@ -79,8 +85,10 @@
     const modal = $(id);
     modal.classList.remove("hidden");
     requestAnimationFrame(() => modal.classList.add("modal-open"));
-    const focusable = $("input:not([type=hidden]), button.btn-primary", modal);
-    if (focusable) setTimeout(() => focusable.focus(), 50);
+    const panel = $(".modal-panel", modal);
+    panel.scrollTop = 0;
+    const target = $("[data-autofocus]", modal) || panel;
+    setTimeout(() => target.focus({ preventScroll: target === panel }), 50);
   }
 
   function closeModal(id) {
@@ -143,6 +151,7 @@
     try {
       const data = await api("api/devices");
       state.devices = data.devices || [];
+      if (data.settings) state.settings = data.settings;
       render();
     } catch (err) {
       $("#loading").textContent = `Geräte konnten nicht geladen werden: ${err.message}`;
@@ -163,9 +172,20 @@
       const commands = device.commands || [];
       $(".device-count", card).textContent = commands.length === 1 ? "1 Taste" : `${commands.length} Tasten`;
       $(".no-commands", card).classList.toggle("hidden", commands.length > 0);
+      const sir = device.smartir;
+      const sirBtn = $(".smartir-btn", card);
+      sirBtn.dataset.state = sir ? (sir.installed ? "installed" : "configured") : "none";
+      sirBtn.title = sir ? (sir.installed ? `SmartIR installiert (Code ${sir.code})` : `SmartIR eingerichtet (Code ${sir.code}), noch nicht installiert`) : "Als SmartIR-Gerät in Home Assistant nutzen";
 
       const list = $(".command-list", card);
-      for (const command of commands) {
+      const expanded = state.expanded.has(device.id);
+      const visible = expanded ? commands : commands.slice(0, COLLAPSED_COUNT);
+      if (commands.length > COLLAPSED_COUNT) {
+        const more = $(".show-more", card);
+        more.classList.remove("hidden");
+        more.textContent = expanded ? "Weniger anzeigen" : `Alle ${commands.length} Tasten anzeigen`;
+      }
+      for (const command of visible) {
         const row = $("#tpl-command").content.firstElementChild.cloneNode(true);
         row.dataset.commandId = command.id;
         $(".command-name", row).textContent = command.name;
@@ -285,7 +305,7 @@
       l.code = result.code;
       $("#learn-length").textContent = result.length;
       $("#learn-code").textContent = result.code;
-      $("#command-name").value = "";
+      $("#command-name").value = l.presetName || "";
       showLearnStep("learn-success");
       setTimeout(() => $("#command-name").focus(), 50);
     } catch (err) {
@@ -302,11 +322,14 @@
     }
   }
 
-  function openLearnModal(deviceId) {
+  function openLearnModal(deviceId, preset = {}) {
     const device = deviceById(deviceId);
     if (!device) return;
     state.learn.deviceId = deviceId;
-    $("#learn-device-name").textContent = device.name;
+    state.learn.slot = preset.slot || null;
+    state.learn.source = Boolean(preset.source);
+    state.learn.presetName = preset.name || "";
+    $("#learn-device-name").textContent = preset.label ? `${device.name} · ${preset.label}` : device.name;
     const existing = new Set((device.commands || []).map((c) => c.name.toLowerCase()));
     const box = $("#name-suggestions");
     box.replaceChildren();
@@ -330,11 +353,15 @@
     const device = deviceById(l.deviceId);
     const overwrite = device && (device.commands || []).some((c) => c.name.toLowerCase() === name.toLowerCase());
     try {
-      await api("api/save-command", { method: "POST", body: { device_id: l.deviceId, name, learn_id: l.learnId } });
+      await api("api/save-command", {
+        method: "POST",
+        body: { device_id: l.deviceId, name, learn_id: l.learnId, smartir_slot: l.slot, smartir_source: l.source },
+      });
       l.learnId = null;
       closeModal("#modal-learn");
       toast(overwrite ? `„${name}“ aktualisiert` : `„${name}“ gespeichert`, "success");
       await loadDevices();
+      if (isOpen("#modal-smartir") && state.smartir.deviceId === l.deviceId) await loadSmartir();
     } catch (err) {
       toast(err.message, "error");
     }
@@ -361,8 +388,10 @@
     const entity = $("#remote-entity").value.trim() || "remote.rm4_mini";
     out.textContent = "Generiere …";
     try {
+      if (entity !== state.settings.remote_entity) {
+        state.settings = await api("api/settings", { method: "PUT", body: { remote_entity: entity } });
+      }
       out.textContent = await api(`api/export/yaml?remote_entity=${encodeURIComponent(entity)}`);
-      try { localStorage.setItem("blm.remoteEntity", entity); } catch (_) { /* storage blocked */ }
     } catch (err) {
       out.textContent = `# Fehler: ${err.message}`;
     }
@@ -379,24 +408,357 @@
     }
   }
 
+  // ------------------------------------------------------------------ SmartIR database
+
+  function isOpen(id) {
+    return !$(id).classList.contains("hidden");
+  }
+
+  function showDeviceTab(tab) {
+    $$("#modal-device [data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
+    $$("#modal-device .tab-pane").forEach((pane) => pane.classList.toggle("hidden", pane.dataset.pane !== tab));
+    if (tab === "db") {
+      loadCatalog();
+      setTimeout(() => $("#db-search").focus(), 50);
+    } else {
+      setTimeout(() => $("#device-name").focus(), 50);
+    }
+  }
+
+  async function loadCatalog() {
+    const type = state.db.type;
+    $$("#db-type [data-type]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.type === type)));
+    selectDbEntry(null);
+    if (!state.db.cache[type]) {
+      $("#db-results").innerHTML = '<li class="db-empty">Lade SmartIR-Datenbank …</li>';
+      try {
+        state.db.cache[type] = (await api(`api/smartir/catalog?type=${type}`)).entries;
+      } catch (err) {
+        $("#db-results").innerHTML = "";
+        const li = document.createElement("li");
+        li.className = "db-empty";
+        li.textContent = err.message;
+        $("#db-results").appendChild(li);
+        return;
+      }
+    }
+    renderCatalog();
+  }
+
+  function renderCatalog() {
+    const entries = state.db.cache[state.db.type];
+    if (!entries) return;
+    const terms = $("#db-search").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const matches = entries.filter((e) => {
+      const hay = `${e.manufacturer} ${e.models.join(" ")} ${e.code}`.toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+    const list = $("#db-results");
+    list.replaceChildren();
+    if (!matches.length) {
+      list.innerHTML = '<li class="db-empty">Nichts gefunden – dann einfach selbst anlernen.</li>';
+      return;
+    }
+    for (const entry of matches.slice(0, 150)) {
+      const li = document.createElement("li");
+      li.className = "db-row";
+      li.setAttribute("role", "option");
+      li.tabIndex = 0;
+      li.dataset.code = entry.code;
+      li.innerHTML = '<span class="db-maker"></span><span class="db-models"></span><span class="db-code"></span>';
+      $(".db-maker", li).textContent = entry.manufacturer;
+      $(".db-models", li).textContent = entry.models.join(", ");
+      $(".db-code", li).textContent = `#${entry.code}`;
+      const choose = () => selectDbEntry(entry);
+      li.addEventListener("click", choose);
+      li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); } });
+      if (state.db.selected && state.db.selected.code === entry.code) li.setAttribute("aria-selected", "true");
+      list.appendChild(li);
+    }
+  }
+
+  function selectDbEntry(entry) {
+    state.db.selected = entry;
+    $("#db-selected").classList.toggle("hidden", !entry);
+    $("#db-import").disabled = !entry;
+    $$("#db-results .db-row").forEach((r) => r.setAttribute("aria-selected", String(!!entry && Number(r.dataset.code) === entry.code)));
+    if (entry) {
+      const kind = state.db.type === "light" ? "Licht" : "TV";
+      $("#db-name").value = `${entry.manufacturer} ${kind}`.slice(0, 60);
+    }
+  }
+
+  async function testDbCode(button) {
+    const entry = state.db.selected;
+    if (!entry) return;
+    button.disabled = true;
+    try {
+      await api("api/smartir/test", { method: "POST", body: { type: state.db.type, code: entry.code, slot: button.dataset.test } });
+      button.classList.add("is-sent");
+      setTimeout(() => button.classList.remove("is-sent"), 900);
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function importFromDb(event) {
+    event.preventDefault();
+    const entry = state.db.selected;
+    const name = $("#db-name").value.trim();
+    if (!entry || !name) return;
+    const button = $("#db-import");
+    button.disabled = true;
+    try {
+      const device = await api("api/smartir/import", {
+        method: "POST",
+        body: { type: state.db.type, code: entry.code, name, icon: state.db.type === "light" ? "light" : "tv" },
+      });
+      closeModal("#modal-device");
+      toast(`„${device.name}“ mit ${device.commands.length} Tasten übernommen`, "success");
+      await loadDevices();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      button.disabled = !state.db.selected;
+    }
+  }
+
+  // ------------------------------------------------------------------ SmartIR device
+
+  async function openSmartir(deviceId) {
+    const device = deviceById(deviceId);
+    if (!device) return;
+    state.smartir.deviceId = deviceId;
+    state.smartir.view = null;
+    $("#smartir-device-name").textContent = device.name;
+    $("#smartir-slots").innerHTML = '<li class="text-sm text-ha-muted">Lade …</li>';
+    openModal("#modal-smartir");
+    try {
+      if (!state.types) state.types = await api("api/smartir/types");
+      await loadSmartir();
+      if (!device.smartir) await saveSmartir(); // keep the automatic suggestion
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  async function loadSmartir(type) {
+    const id = state.smartir.deviceId;
+    const query = type ? `?type=${type}` : "";
+    const view = await api(`api/devices/${encodeURIComponent(id)}/smartir${query}`);
+    state.smartir.view = view;
+    renderSmartir();
+  }
+
+  async function saveSmartir(patch = {}) {
+    const view = state.smartir.view;
+    if (!view) return;
+    const config = { ...view.config, ...patch };
+    try {
+      const updated = await api(`api/devices/${encodeURIComponent(state.smartir.deviceId)}/smartir`, {
+        method: "PUT",
+        body: { type: config.type, code: Number(config.code) || null, slots: config.slots, sources: config.sources, brightness_steps: Number(config.brightness_steps) || null },
+      });
+      state.smartir.view = updated;
+      renderSmartir();
+      const device = deviceById(state.smartir.deviceId);
+      if (device) { device.smartir = updated.config; render(); }
+    } catch (err) {
+      toast(err.message, "error");
+      renderSmartir();
+    }
+  }
+
+  function commandOptions(select, device, selectedId) {
+    select.replaceChildren(new Option("– nicht belegt –", ""));
+    for (const command of device.commands || []) {
+      select.appendChild(new Option(command.name, command.id, false, command.id === selectedId));
+    }
+  }
+
+  function slotRow(slot, device, config) {
+    const li = document.createElement("li");
+    li.className = "slot-row";
+    const assigned = config.slots[slot.key];
+    li.dataset.state = assigned ? "ok" : "empty";
+    li.innerHTML = '<span class="slot-check" aria-hidden="true"></span><span class="slot-label"></span><select class="input select"></select><button type="button" class="btn btn-ghost btn-xs">Anlernen</button>';
+    $(".slot-label", li).textContent = slot.label;
+    const select = $("select", li);
+    select.setAttribute("aria-label", slot.label);
+    commandOptions(select, device, assigned);
+    select.addEventListener("change", () => {
+      const slots = { ...config.slots };
+      if (select.value) slots[slot.key] = select.value; else delete slots[slot.key];
+      saveSmartir({ slots });
+    });
+    $("button", li).addEventListener("click", () => openLearnModal(device.id, { name: slot.learnName || slot.label, label: slot.label, slot: slot.key }));
+    return li;
+  }
+
+  function renderSmartir() {
+    const view = state.smartir.view;
+    const device = deviceById(state.smartir.deviceId);
+    if (!view || !device || !state.types) return;
+    const config = view.config;
+    const type = state.types[config.type];
+
+    const typeBox = $("#smartir-type");
+    typeBox.replaceChildren();
+    for (const [key, t] of Object.entries(state.types)) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "segment";
+      b.setAttribute("aria-pressed", String(key === config.type));
+      b.innerHTML = `<span></span><small></small>`;
+      b.firstChild.textContent = t.label;
+      b.lastChild.textContent = t.hint;
+      b.addEventListener("click", async () => {
+        if (key === config.type) return;
+        try { await loadSmartir(key); await saveSmartir(); } catch (err) { toast(err.message, "error"); }
+      });
+      typeBox.appendChild(b);
+    }
+    if (document.activeElement !== $("#smartir-code")) $("#smartir-code").value = config.code;
+
+    const slots = $("#smartir-slots");
+    slots.replaceChildren(...type.slots.map((slot) => slotRow(slot, device, config)));
+
+    $("#smartir-sources-wrap").classList.toggle("hidden", !type.has_sources);
+    $("#smartir-light-wrap").classList.toggle("hidden", config.type !== "light");
+    if (type.has_sources) {
+      const box = $("#smartir-sources");
+      box.replaceChildren();
+      const slotIds = new Set(Object.values(config.slots));
+      for (const command of device.commands || []) {
+        if (slotIds.has(command.id) && !config.sources.includes(command.id)) continue;
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "chip chip-toggle";
+        chip.textContent = command.name;
+        chip.setAttribute("aria-pressed", String(config.sources.includes(command.id)));
+        chip.addEventListener("click", () => {
+          const sources = config.sources.includes(command.id)
+            ? config.sources.filter((s) => s !== command.id)
+            : [...config.sources, command.id];
+          saveSmartir({ sources });
+        });
+        box.appendChild(chip);
+      }
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "chip chip-add";
+      add.textContent = "+ Quelle anlernen";
+      add.addEventListener("click", () => openLearnModal(device.id, { name: "HDMI 1", label: "Neue Quelle", source: true }));
+      box.appendChild(add);
+      $("#smartir-digits").replaceChildren(...type.digits.map((slot) => slotRow({ ...slot, learnName: slot.label.replace("Ziffer ", "") }, device, config)));
+    }
+    if (document.activeElement !== $("#smartir-steps")) $("#smartir-steps").value = config.brightness_steps;
+
+    // Status
+    const status = $("#smartir-status");
+    const install = view.install;
+    let tone = "info";
+    let html = "";
+    if (view.missing.length) {
+      tone = "warn";
+      html = `<strong>Es fehlt noch:</strong> ${escapeHtml(view.missing.join(", "))}`;
+    } else if (!install.ha_config) {
+      tone = "warn";
+      html = "Kein Zugriff auf den HA-Konfigurationsordner. Lade die JSON-Datei herunter und lege sie selbst ab.";
+    } else if (!install.smartir) {
+      tone = "warn";
+      html = 'SmartIR ist in Home Assistant noch nicht installiert. Installiere es über <strong>HACS</strong> (Suche „SmartIR“) und starte HA neu.';
+    } else if (install.installed && config.installed) {
+      tone = "ok";
+      html = `<strong>Installiert</strong> als Code ${config.code}. Änderungen werden automatisch übernommen – nach dem ersten Mal YAML einfügen und HA neu starten.`;
+    } else {
+      html = "Bereit. „In Home Assistant installieren“ schreibt die Code-Datei direkt in deinen SmartIR-Ordner.";
+    }
+    status.dataset.tone = tone;
+    status.innerHTML = html;
+    $("#smartir-install").disabled = Boolean(view.missing.length) || !install.smartir;
+    $("#smartir-install").textContent = install.installed && config.installed ? "Erneut installieren" : "In Home Assistant installieren";
+    $("#smartir-yaml").textContent = view.yaml;
+    if (config.installed) $("#smartir-yaml-wrap").open = true;
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  function bindSmartirEvents() {
+    let codeTimer = null;
+    $("#smartir-code").addEventListener("input", () => {
+      clearTimeout(codeTimer);
+      codeTimer = setTimeout(() => {
+        const value = Number($("#smartir-code").value);
+        if (value > 0) saveSmartir({ code: value });
+      }, 600);
+    });
+    $("#smartir-steps").addEventListener("change", () => saveSmartir({ brightness_steps: Number($("#smartir-steps").value) }));
+    $("#smartir-install").addEventListener("click", async () => {
+      const button = $("#smartir-install");
+      button.disabled = true;
+      try {
+        const view = await api(`api/devices/${encodeURIComponent(state.smartir.deviceId)}/smartir/install`, { method: "POST" });
+        state.smartir.view = view;
+        const device = deviceById(state.smartir.deviceId);
+        if (device) { device.smartir = view.config; render(); }
+        renderSmartir();
+        toast("Code-Datei in SmartIR installiert", "success");
+      } catch (err) {
+        toast(err.message, "error");
+        renderSmartir();
+      }
+    });
+    $("#smartir-download").addEventListener("click", () => {
+      const view = state.smartir.view;
+      if (!view) return;
+      const blob = new Blob([JSON.stringify(view.json, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `${view.config.code}.json`;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+    });
+    $("#smartir-yaml-copy").addEventListener("click", async () => {
+      const label = $("#smartir-yaml-copy span");
+      if (await copyText($("#smartir-yaml").textContent)) {
+        label.textContent = "Kopiert!";
+        setTimeout(() => { label.textContent = "YAML kopieren"; }, 1600);
+      } else {
+        toast("Kopieren nicht möglich – bitte Text manuell markieren.", "error");
+      }
+    });
+  }
+
   // ------------------------------------------------------------------ events
 
   function bindEvents() {
     const openNewDevice = () => {
       $("#form-device").reset();
       buildIconPicker();
+      showDeviceTab("manual");
       openModal("#modal-device");
     };
+    $$("#modal-device [data-tab]").forEach((tab) => tab.addEventListener("click", () => showDeviceTab(tab.dataset.tab)));
+    $$("#db-type [data-type]").forEach((b) => b.addEventListener("click", () => { state.db.type = b.dataset.type; loadCatalog(); }));
+    $("#db-search").addEventListener("input", renderCatalog);
+    $("#form-db").addEventListener("submit", importFromDb);
+    $$("#db-selected [data-test]").forEach((b) => b.addEventListener("click", () => testDbCode(b)));
+    bindSmartirEvents();
     $("#btn-new-device").addEventListener("click", openNewDevice);
     $$("[data-action=new-device]").forEach((b) => b.addEventListener("click", openNewDevice));
     $("#form-device").addEventListener("submit", createDevice);
     $("#status-pill").addEventListener("click", refreshStatus);
 
     $("#btn-export").addEventListener("click", () => {
-      try {
-        const saved = localStorage.getItem("blm.remoteEntity");
-        if (saved) $("#remote-entity").value = saved;
-      } catch (_) { /* storage blocked */ }
+      $("#remote-entity").value = state.settings.remote_entity;
       openModal("#modal-yaml");
       loadYaml();
     });
@@ -440,6 +802,13 @@
       switch (button.dataset.action) {
         case "learn":
           openLearnModal(deviceId);
+          break;
+        case "smartir":
+          openSmartir(deviceId);
+          break;
+        case "toggle-more":
+          if (state.expanded.has(deviceId)) state.expanded.delete(deviceId); else state.expanded.add(deviceId);
+          render();
           break;
         case "send":
           sendCommand(button, deviceId, commandId);

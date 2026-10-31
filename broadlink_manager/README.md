@@ -7,6 +7,9 @@ mit einem **Broadlink RM4 mini** – direkt in der HA-Seitenleiste.
 - „Taste anlernen“ mit Countdown, danach Namen vergeben und speichern
 - „Senden“-Button neben jeder Taste zum direkten Testen
 - YAML-Export: fertige Skripte (`remote.send_command`) und `switch`-Entitäten
+- **SmartIR-Assistent:** macht aus deinen Tasten echte HA-Geräte (Media Player, Licht)
+  und installiert die Code-Datei per Knopfdruck
+- **SmartIR-Datenbank:** fertige Codes vieler Marken suchen, testen und übernehmen
 - Läuft komplett lokal (kein Cloud-Dienst, kein CDN)
 
 ## Installation
@@ -57,6 +60,46 @@ RM4 mini über die **Broadlink-Integration** in HA eingerichtet ist.
 
 Die Skripte lassen sich danach in Dashboards (Button-Karte) oder Automationen verwenden.
 
+## SmartIR – echte Geräte statt einzelner Tasten
+
+[SmartIR](https://github.com/smartHomeHub/SmartIR) macht aus IR-Codes richtige
+Home-Assistant-Entitäten, z. B. `media_player.tv` mit Ein/Aus, Lautstärke und
+Quellenwahl oder `light.led_strip` mit Helligkeit. Diese App liefert die Codes dafür.
+
+**Einmalig:** SmartIR über **HACS** installieren (Suche „SmartIR“) und HA neu starten.
+
+### Gerät aus der Datenbank übernehmen
+
+1. **Neues Gerät anlegen → Aus SmartIR-Datenbank**
+2. Typ wählen (TV & Media / Licht), Hersteller suchen, Eintrag antippen.
+3. Mit **An / Aus** testen – reagiert das Gerät, **Übernehmen**.
+   Fehlt eine Taste, einfach in der Karte nachlernen.
+
+### Eigenes Gerät zu SmartIR machen
+
+1. In der Gerätekarte auf **SmartIR** tippen.
+2. Typ wählen: **Media Player** (TV, Soundbar, Beamer, Receiver) oder **Licht** (LED).
+3. Die App ordnet Tasten anhand ihrer Namen automatisch zu (z. B. „Power“ → Ein/Aus,
+   „Lauter“ → Lautstärke +). Zuordnungen per Auswahlliste ändern, fehlende Funktionen
+   direkt mit **Anlernen** ergänzen.
+4. **In Home Assistant installieren** – die Code-Datei landet in
+   `custom_components/smartir/codes/<typ>/<code>.json`.
+5. Den angezeigten YAML-Block in `configuration.yaml` einfügen und HA neu starten.
+
+Später neu angelernte Tasten werden automatisch in die installierte Datei übernommen.
+Löscht ein SmartIR-Update über HACS die Datei, stellt die App sie innerhalb von
+10 Minuten wieder her.
+
+Eigene Codes bekommen Nummern ab **90001**, damit sie nie mit der
+SmartIR-Datenbank (1000–7999) kollidieren.
+
+> Die App braucht dafür Schreibzugriff auf den HA-Konfigurationsordner
+> (`map: homeassistant_config`). Sie schreibt dort ausschließlich in
+> `custom_components/smartir/codes/`.
+
+Klimaanlagen werden noch nicht unterstützt: Ihre Fernbedienungen senden bei jedem
+Tastendruck den kompletten Zustand, dafür kommt später ein eigener Assistent.
+
 ## Hinweise
 
 - Der RM4 mini kann nur **Infrarot** (kein 433-MHz-Funk). LED-Strips, Beamer,
@@ -80,6 +123,12 @@ Die Skripte lassen sich danach in Dashboards (Button-Karte) oder Automationen ve
 | POST   | `/api/save-command`       | `{device_id, name, learn_id}` oder `{device_id, name, code}` speichern |
 | POST   | `/api/send`               | `{device_id, command_id}` oder `{code}` senden |
 | GET    | `/api/export/yaml?remote_entity=remote.xyz` | HA-YAML |
+| GET/PUT | `/api/settings`          | Remote-Entität speichern |
+| GET/PUT | `/api/devices/{id}/smartir` | SmartIR-Zuordnung (GET mit `?type=` liefert Vorschlag) |
+| POST   | `/api/devices/{id}/smartir/install` | Code-Datei in SmartIR schreiben |
+| GET    | `/api/smartir/catalog?type=media_player` | SmartIR-Datenbank (nur Broadlink) |
+| POST   | `/api/smartir/test`       | Code aus der Datenbank testweise senden |
+| POST   | `/api/smartir/import`     | Code aus der Datenbank als Gerät übernehmen |
 
 ## Entwicklung
 
