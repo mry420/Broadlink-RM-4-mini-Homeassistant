@@ -10,6 +10,7 @@ For local development HA_URL + HA_TOKEN can point to any HA instance.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -24,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import websocket  # websocket-client
 
+import colors
 from smartir import _NAME_HINTS, _SOURCE_PREFIXES, _TOGGLE_HINTS, _norm
 
 log = logging.getLogger("broadlink_manager.ha")
@@ -161,9 +163,50 @@ def _grid(cards: List[Dict[str, Any]], columns: int) -> Dict[str, Any]:
     return {"type": "grid", "columns": columns, "square": False, "cards": cards, "grid_options": {"columns": "full"}}
 
 
+def _color_palette_card(items: List[Tuple[str, str, str]], columns: int = 4) -> Dict[str, Any]:
+    """Coloured circles (always in colour, unlike tiles) as one picture-elements card.
+
+    items: (entity, name, palette key). A transparent SVG defines the grid size.
+    """
+    rows = (len(items) + columns - 1) // columns
+    width, cell = 400, 100
+    svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{rows * cell}'/>"
+    image = "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
+    elements = []
+    for i, (entity, name, color_key) in enumerate(items):
+        row, col = divmod(i, columns)
+        elements.append({
+            "type": "icon",
+            "icon": "mdi:circle",
+            "title": name,
+            "tap_action": {"action": "perform-action", "perform_action": "script.turn_on", "target": {"entity_id": entity}},
+            "hold_action": {"action": "more-info", "entity": entity},
+            "style": {
+                "top": f"{(row + 0.5) * 100 / rows:.2f}%",
+                "left": f"{(col + 0.5) * 100 / columns:.2f}%",
+                "color": colors.PALETTE[color_key]["hex"],
+                "--mdc-icon-size": "56px",
+                "filter": "drop-shadow(0 0 6px rgba(0,0,0,.5))",
+            },
+        })
+    return {"type": "picture-elements", "image": image, "elements": elements, "grid_options": {"columns": "full"}}
+
+
 def build_remote_view(device: Dict[str, Any]) -> Dict[str, Any]:
     buttons: Dict[str, List[Dict[str, Any]]] = {}
-    for command in device.get("commands", []):
+    commands = device.get("commands", [])
+    color_of = {c["id"]: colors.command_color(c) for c in commands}
+    is_led = device.get("icon") in ("led", "light") or sum(1 for v in color_of.values() if v) >= 3
+    color_items: List[Tuple[str, str, str]] = []
+    mode_cards: List[Dict[str, Any]] = []
+    for command in commands:
+        entity = f"script.{script_id(device['id'], command['id'])}"
+        if is_led and color_of[command["id"]]:
+            color_items.append((entity, command["name"], color_of[command["id"]]))
+            continue
+        if is_led and colors.is_mode(command["name"]):
+            mode_cards.append(_button(entity, command["name"], "mdi:auto-fix"))
+            continue
         role = button_role(command["name"])
         card = _button(f"script.{script_id(device['id'], command['id'])}", command["name"], button_icon(command["name"], role))
         buttons.setdefault(role, []).append(card)
@@ -204,6 +247,13 @@ def build_remote_view(device: Dict[str, Any]) -> Dict[str, Any]:
     light = [c for r in ("brighten", "dim", "warmer", "colder", "night") for c in buttons.pop(r, [])]
     if light:
         cards.append(_grid(light, 3 if len(light) != 4 else 2))
+
+    if color_items:
+        cards.append({"type": "heading", "heading": "Farben", "heading_style": "subtitle", "grid_options": {"columns": "full"}})
+        cards.append(_color_palette_card(color_items))
+    if mode_cards:
+        cards.append({"type": "heading", "heading": "Effekte", "heading_style": "subtitle", "grid_options": {"columns": "full"}})
+        cards.append(_grid(mode_cards, 4 if len(mode_cards) >= 4 else len(mode_cards)))
 
     media = [c for r in ("rewind", "prev", "play", "pause", "stop", "next", "forward", "record") for c in buttons.pop(r, [])]
     if media:
@@ -352,7 +402,10 @@ class HASync:
             "dashboard_url": f"/{DASHBOARD_URL}",
         }
         if self._client.available:
+            log.info("Home-Assistant-API verfügbar (%s) – Geräte werden automatisch angelegt.", self._client.base)
             threading.Thread(target=self._loop, name="ha-sync", daemon=True).start()
+        else:
+            log.warning("Keine Home-Assistant-API (SUPERVISOR_TOKEN fehlt) – automatisches Anlegen ist aus.")
 
     # -- state file -------------------------------------------------------
 
@@ -415,7 +468,12 @@ class HASync:
             self.status["running"] = False
             return
 
-        remotes = self._detect_remotes()
+        problems: List[str] = []
+        try:
+            remotes = self._detect_remotes()
+        except HAError as err:
+            remotes = []
+            problems.append(f"Broadlink-Erkennung: {err}")
         self.status["broadlink_remotes"] = remotes
         remote = settings.get("remote_entity") or ""
         if remotes and remote not in remotes:
@@ -447,8 +505,41 @@ class HASync:
             changed += 1
             self._write_state({**state, "scripts": known})
 
+        # Check that HA really loaded the scripts (needs `script: !include scripts.yaml`).
+        if desired:
+            probe = next(iter(desired))
+            try:
+                self._client.rest("GET", f"states/script.{probe}")
+            except HAError as err:
+                if "404" in str(err):
+                    problems.append(
+                        "Die Skripte wurden in scripts.yaml geschrieben, aber Home Assistant lädt sie nicht. "
+                        "In configuration.yaml fehlt vermutlich die Zeile „script: !include scripts.yaml“."
+                    )
+                else:
+                    problems.append(str(err))
+
         dashboard = build_dashboard(data["devices"])
         dash_hash = _hash(dashboard)
+        try:
+            self._save_dashboard(state, dashboard, dash_hash, changed)
+        except HAError as err:
+            problems.append(f"Dashboard: {err}")
+
+        state["scripts"] = known
+        self._write_state(state)
+        self.status.update(
+            running=False,
+            last_sync=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            scripts=len(known),
+            error=" · ".join(problems) or None,
+        )
+        if problems:
+            log.warning("Home-Assistant-Abgleich unvollständig: %s", " · ".join(problems))
+        if changed:
+            log.info("Home Assistant aktualisiert: %d Skript-Änderungen, %d Skripte gesamt.", changed, len(known))
+
+    def _save_dashboard(self, state: Dict[str, Any], dashboard: Dict[str, Any], dash_hash: str, changed: int) -> None:
         if state.get("dashboard") != dash_hash or changed:
             existing = self._client.ws([{"type": "lovelace/dashboards/list"}])[0]
             if isinstance(existing, Exception):
@@ -469,13 +560,3 @@ class HASync:
                 if isinstance(result, Exception):
                     raise result
             state["dashboard"] = dash_hash
-
-        state["scripts"] = known
-        self._write_state(state)
-        self.status.update(
-            running=False,
-            last_sync=time.strftime("%Y-%m-%dT%H:%M:%S"),
-            scripts=len(known),
-        )
-        if changed:
-            log.info("Home Assistant aktualisiert: %d Skript-Änderungen, %d Skripte gesamt.", changed, len(known))

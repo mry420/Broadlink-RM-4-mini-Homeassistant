@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+import colors
 import ha_sync
 import irdb
 import smartir
@@ -36,7 +37,7 @@ import smartir
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"
@@ -410,6 +411,26 @@ class SaveCommand(BaseModel):
     smartir_source: bool = False
 
 
+class CommandUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=60)
+    color: Optional[str] = Field(None, max_length=30)  # palette key, "" = no colour
+
+
+class ColorAssignment(BaseModel):
+    id: str
+    color: str  # palette key, "" = other function, "none" = no reaction
+
+
+class ColorCheck(BaseModel):
+    assignments: List[ColorAssignment]
+    delete_dead: bool = True
+
+
+class LedTest(BaseModel):
+    family: int = Field(..., ge=0)
+    key: str = Field(..., max_length=10)
+
+
 class SettingsUpdate(BaseModel):
     remote_entity: Optional[str] = Field(None, max_length=100)
     ha_auto: Optional[bool] = None
@@ -485,7 +506,16 @@ def api_status() -> Dict[str, Any]:
 @app.get("/api/devices")
 def api_devices() -> Dict[str, Any]:
     with _store_lock:
-        return load_store()
+        data = load_store()
+    for device in data["devices"]:
+        for command in device.get("commands", []):
+            command["display_color"] = colors.command_color(command)
+    return data
+
+
+@app.get("/api/colors")
+def api_colors() -> Dict[str, Any]:
+    return {"palette": colors.PALETTE}
 
 
 @app.post("/api/devices")
@@ -523,6 +553,105 @@ def api_delete_command(device_id: str, command_id: str) -> Dict[str, Any]:
             device["smartir"] = smartir.normalize_config(device, data["devices"], device["smartir"])
         _sync_smartir(device, data)
         save_store(data)
+    return {"ok": True}
+
+
+def _unique_name(name: str, taken: List[str]) -> str:
+    candidate, n = name, 2
+    while candidate.lower() in taken:
+        candidate, n = f"{name} {n}", n + 1
+    return candidate
+
+
+@app.put("/api/devices/{device_id}/commands/{command_id}")
+def api_update_command(device_id: str, command_id: str, body: CommandUpdate) -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        command = find_command(device, command_id)
+        if body.name is not None:
+            name = body.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Name darf nicht leer sein.")
+            if any(c["name"].lower() == name.lower() and c["id"] != command_id for c in device["commands"]):
+                raise HTTPException(status_code=409, detail=f"Es gibt schon eine Taste „{name}“.")
+            command["name"] = name
+        if body.color is not None:
+            if body.color and body.color not in colors.PALETTE:
+                raise HTTPException(status_code=400, detail="Unbekannte Farbe.")
+            command["color"] = body.color or ""
+        command["updated"] = _now()
+        _sync_smartir(device, data)
+        save_store(data)
+    return {**command, "display_color": colors.command_color(command)}
+
+
+@app.post("/api/devices/{device_id}/colors")
+def api_color_check(device_id: str, body: ColorCheck) -> Dict[str, Any]:
+    """Store the colours the user actually saw and fix the button names."""
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        by_id = {c["id"]: c for c in device.get("commands", [])}
+        dead = []
+        renamed = 0
+        for item in body.assignments:
+            command = by_id.get(item.id)
+            if not command:
+                continue
+            if item.color == "none":
+                dead.append(item.id)
+                continue
+            if item.color and item.color not in colors.PALETTE:
+                raise HTTPException(status_code=400, detail=f"Unbekannte Farbe {item.color}.")
+            was_colour_button = bool(colors.command_color(command)) or command["name"].lower().startswith(("farbe", "color"))
+            command["color"] = item.color
+            # Colour buttons get the colour as name; other buttons keep theirs.
+            if item.color and was_colour_button:
+                label = colors.PALETTE[item.color]["label"]
+                if command["name"] != label:
+                    taken = [c["name"].lower() for c in device["commands"] if c["id"] != command["id"]]
+                    command["name"] = _unique_name(label, taken)
+                    renamed += 1
+            command["updated"] = _now()
+        if body.delete_dead and dead:
+            device["commands"] = [c for c in device["commands"] if c["id"] not in dead]
+        if device.get("smartir"):
+            device["smartir"] = smartir.normalize_config(device, data["devices"], device["smartir"])
+        _sync_smartir(device, data)
+        save_store(data)
+    log.info("Farbprüfung %s: %d umbenannt, %d ohne Reaktion.", device["name"], renamed, len(dead))
+    return {"renamed": renamed, "removed": len(dead) if body.delete_dead else 0}
+
+
+_led_families: Optional[List[Dict[str, Any]]] = None
+
+
+def _families() -> List[Dict[str, Any]]:
+    global _led_families
+    if _led_families is None:
+        _led_families = json.loads((BASE_DIR / "data" / "led_families.json").read_text(encoding="utf-8"))
+    return _led_families
+
+
+@app.get("/api/led/families")
+def api_led_families() -> Dict[str, Any]:
+    return {"families": [
+        {"index": i, "path": f["path"], "buttons": f["buttons"], "remotes": f["remotes"],
+         "brands": f["brands"], "keys": sorted(f["codes"])}
+        for i, f in enumerate(_families())
+    ]}
+
+
+@app.post("/api/led/test")
+def api_led_test(body: LedTest) -> Dict[str, Any]:
+    families = _families()
+    if body.family >= len(families):
+        raise HTTPException(status_code=404, detail="Unbekannte Familie.")
+    code = families[body.family]["codes"].get(body.key)
+    if not code:
+        raise HTTPException(status_code=404, detail="Diese Fernbedienung hat diese Taste nicht.")
+    client.send(_packets(code))
     return {"ok": True}
 
 
@@ -957,7 +1086,12 @@ _CATEGORY_ICONS = {"tv": "tv", "projector": "projector", "audio": "soundbar", "v
 
 def _german_button_name(name: str) -> str:
     key = re.sub(r"[_\s]+", " ", name.strip()).lower()
-    return _BUTTON_NAMES.get(key, re.sub(r"_+", " ", name).strip())
+    if key in _BUTTON_NAMES:
+        return _BUTTON_NAMES[key]
+    color = colors.guess_color(name)
+    if color and len(key) > 2 and not re.search(r"\d", key):  # "Red" → "Rot", but keep "R1"
+        return colors.PALETTE[color]["label"]
+    return re.sub(r"_+", " ", name).strip()
 
 
 def _irdb_remote(path: str) -> List[Dict[str, Any]]:

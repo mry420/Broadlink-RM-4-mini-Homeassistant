@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0
+
+- LED-Finder: testet die 42 gängigen LED-Fernbedienungs-Familien nacheinander
+  („Leuchtet es rot? … grün?“) und übernimmt die passende automatisch
+- Farben prüfen: die App sendet jede Farbtaste, du tippst die echte Farbe an –
+  Namen werden korrigiert, Tasten ohne Reaktion entfernt
+- Farbtasten zeigen ihre Farbe in der App und als echte Farbpalette in der
+  Home-Assistant-Fernbedienung, Effekte (Fade, Strobe …) eigener Bereich
+- Farbnamen aus der Datenbank werden übersetzt („Red“ → „Rot“, „Light Blue“ → „Hellblau“)
+- Home-Assistant-Abgleich robuster: Skripte werden auch angelegt, wenn das Dashboard
+  scheitert; klare Fehlermeldung, falls HA die Skripte nicht lädt
+
 ## 1.3.0
 
 - Geräte landen automatisch in Home Assistant: ein Skript pro Taste (über die

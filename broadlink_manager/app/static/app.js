@@ -33,6 +33,9 @@
     smartir: { deviceId: null, view: null, saving: null },
     db: { type: "media_player", cache: {}, selected: null },
     ha: null,
+    palette: {},
+    led: { families: null, index: 0, phase: "red", sending: 0 },
+    colorCheck: { deviceId: null, items: [], index: 0, answers: {} },
     irdb: { categories: null, icons: {}, results: [], selected: null, buttons: [], timer: null, seq: 0 },
   };
 
@@ -179,6 +182,8 @@
       const haLink = $(".ha-link", card);
       haLink.classList.toggle("hidden", !view);
       if (view) haLink.href = view;
+      const coloured = commands.filter((c) => c.display_color).length;
+      $(".color-check-btn", card).classList.toggle("hidden", !(isLedDevice(device) && commands.length) && coloured < 2);
       const sir = device.smartir;
       const sirBtn = $(".smartir-btn", card);
       sirBtn.dataset.state = sir ? (sir.installed ? "installed" : "configured") : "none";
@@ -197,6 +202,13 @@
         row.dataset.commandId = command.id;
         $(".command-name", row).textContent = command.name;
         $(".command-name", row).title = command.name;
+        const swatch = command.display_color && state.palette[command.display_color];
+        if (swatch) {
+          const dot = $(".color-dot", row);
+          dot.classList.remove("hidden");
+          dot.style.background = swatch.hex;
+          dot.title = swatch.label;
+        }
         list.appendChild(row);
       }
       grid.appendChild(card);
@@ -535,9 +547,282 @@
     }
   }
 
+  // ------------------------------------------------------------------ Colours & LED
+
+  // Buttons that switch, dim, time or animate – never a fixed colour.
+  const SKIP_COLOR_WORDS = /\b(an|aus|ein|on|off|power|heller|dunkler|brighter|darker|bright|brightness|dim|dimmer|plus|minus|timer|sleep|schlaf|\d+ ?h|speed|schneller|langsamer|stufe|up|down|dn|hoch|runter|flash|strobe|fade\d*|smooth|jump\d*|auto|mode|modus|quick|slow|music|musik|sound|diy\d*|blinken|effekt)\b/;
+  const SKIP_COLOR_CHECK = { test: (name) => SKIP_COLOR_WORDS.test(name) };
+
+  function isLedDevice(device) {
+    return device.icon === "led" || device.icon === "light";
+  }
+
+  function normName(name) {
+    return name.trim().toLowerCase().replace(/[_\s-]+/g, " ");
+  }
+
+  async function loadPalette() {
+    try {
+      state.palette = (await api("api/colors")).palette;
+    } catch (_) {
+      state.palette = {};
+    }
+  }
+
+  function paletteButton(key, onClick) {
+    const color = state.palette[key];
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "swatch-btn";
+    b.dataset.color = key;
+    b.innerHTML = "<span></span><em></em>";
+    b.firstChild.style.background = color.hex;
+    b.lastChild.textContent = color.label;
+    b.lastChild.style.fontStyle = "normal";
+    b.addEventListener("click", () => onClick(key));
+    return b;
+  }
+
+  // --- colour check ---
+
+  function openColorCheck(deviceId) {
+    const device = deviceById(deviceId);
+    if (!device) return;
+    const items = (device.commands || []).filter((c) => c.display_color || !SKIP_COLOR_CHECK.test(normName(c.name)));
+    if (!items.length) {
+      toast("Dieses Gerät hat keine Farbtasten.", "error");
+      return;
+    }
+    state.colorCheck = { deviceId, items, index: 0, answers: {} };
+    $("#colors-device-name").textContent = device.name;
+    const power = (device.commands || []).find((c) => /^(an|ein|on|power on|power)$/.test(normName(c.name)));
+    $("#colors-power").classList.toggle("hidden", !power);
+    $("#colors-power").dataset.commandId = power ? power.id : "";
+    const palette = $("#colors-palette");
+    palette.replaceChildren(...Object.keys(state.palette).map((key) => paletteButton(key, answerColor)));
+    $("#colors-step").classList.remove("hidden");
+    $("#colors-summary").classList.add("hidden");
+    openModal("#modal-colors");
+    showColorStep(true);
+  }
+
+  async function sendCommandQuiet(deviceId, commandId) {
+    try {
+      await api("api/send", { method: "POST", body: { device_id: deviceId, command_id: commandId } });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  function showColorStep(send) {
+    const c = state.colorCheck;
+    if (c.index >= c.items.length) {
+      showColorSummary();
+      return;
+    }
+    const item = c.items[c.index];
+    $("#colors-progress").textContent = `Taste ${c.index + 1} von ${c.items.length}`;
+    $("#colors-progress-bar").style.width = `${(c.index / c.items.length) * 100}%`;
+    $("#colors-button-name").textContent = `„${item.name}“`;
+    const chosen = c.answers[item.id];
+    $$("#colors-palette .swatch-btn").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.color === chosen)));
+    $("#colors-back").disabled = c.index === 0;
+    if (send) sendCommandQuiet(c.deviceId, item.id);
+  }
+
+  function answerColor(color) {
+    const c = state.colorCheck;
+    const item = c.items[c.index];
+    if (!item) return;
+    c.answers[item.id] = color;
+    c.index += 1;
+    showColorStep(true);
+  }
+
+  function colorLabelFor(item, answer) {
+    if (answer === "none") return { name: item.name, note: "keine Reaktion" };
+    if (!answer) return { name: item.name, note: "Effekt / keine Farbe" };
+    const colorish = item.display_color || /^(farbe|color)/i.test(item.name);
+    return { name: colorish ? state.palette[answer].label : item.name, note: colorish ? "" : state.palette[answer].label };
+  }
+
+  function showColorSummary() {
+    const c = state.colorCheck;
+    $("#colors-step").classList.add("hidden");
+    $("#colors-summary").classList.remove("hidden");
+    const list = $("#colors-result");
+    list.replaceChildren();
+    for (const item of c.items) {
+      if (!(item.id in c.answers)) continue;
+      const answer = c.answers[item.id];
+      const li = document.createElement("li");
+      li.dataset.dead = String(answer === "none");
+      const dot = document.createElement("span");
+      dot.className = "color-dot";
+      dot.style.background = answer && answer !== "none" ? state.palette[answer].hex : "transparent";
+      const label = colorLabelFor(item, answer);
+      const name = document.createElement("span");
+      name.textContent = label.name;
+      const small = document.createElement("small");
+      small.textContent = label.note || (label.name !== item.name ? `war „${item.name}“` : "");
+      li.append(dot, name, small);
+      list.appendChild(li);
+    }
+  }
+
+  async function saveColorCheck() {
+    const c = state.colorCheck;
+    const assignments = Object.entries(c.answers).map(([id, color]) => ({ id, color }));
+    if (!assignments.length) {
+      closeModal("#modal-colors");
+      return;
+    }
+    try {
+      const result = await api(`api/devices/${encodeURIComponent(c.deviceId)}/colors`, {
+        method: "POST",
+        body: { assignments, delete_dead: $("#colors-delete-dead").checked },
+      });
+      closeModal("#modal-colors");
+      const parts = [`${assignments.length} Tasten geprüft`];
+      if (result.renamed) parts.push(`${result.renamed} umbenannt`);
+      if (result.removed) parts.push(`${result.removed} gelöscht`);
+      toast(parts.join(" · "), "success");
+      await loadDevices();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  function bindColorEvents() {
+    $("#colors-resend").addEventListener("click", () => showColorStep(true));
+    $("#colors-skip").addEventListener("click", () => { state.colorCheck.index += 1; showColorStep(true); });
+    $("#colors-back").addEventListener("click", () => {
+      const c = state.colorCheck;
+      if (c.index > 0) { c.index -= 1; showColorStep(true); }
+    });
+    $$("[data-color-answer]").forEach((b) => b.addEventListener("click", () => answerColor(b.dataset.colorAnswer)));
+    $("#colors-power").addEventListener("click", () => sendCommandQuiet(state.colorCheck.deviceId, $("#colors-power").dataset.commandId));
+    $("#colors-redo").addEventListener("click", () => {
+      state.colorCheck.index = 0;
+      $("#colors-step").classList.remove("hidden");
+      $("#colors-summary").classList.add("hidden");
+      showColorStep(true);
+    });
+    $("#colors-save").addEventListener("click", saveColorCheck);
+  }
+
+  // --- LED finder ---
+
+  const LED_STEPS = {
+    red: { word: "rot", hex: "#f44336", glow: "rgb(244 67 54 / 0.55)" },
+    green: { word: "grün", hex: "#4caf50", glow: "rgb(76 175 80 / 0.55)" },
+  };
+
+  async function openLedFinder() {
+    if (isOpen("#modal-device")) closeModal("#modal-device");
+    if (!state.led.families) {
+      try {
+        state.led.families = (await api("api/led/families")).families;
+      } catch (err) {
+        toast(err.message, "error");
+        return;
+      }
+    }
+    state.led.index = 0;
+    openModal("#modal-led");
+    runLedFamily();
+  }
+
+  function showLedPane(id) {
+    for (const pane of ["led-step-test", "led-step-found", "led-step-none"]) {
+      $(`#${pane}`).classList.toggle("hidden", pane !== id);
+    }
+  }
+
+  async function ledSend(key) {
+    try {
+      await api("api/led/test", { method: "POST", body: { family: state.led.index, key } });
+    } catch (err) {
+      if (err.status !== 404) toast(err.message, "error");
+    }
+  }
+
+  async function runLedFamily(phase = "red") {
+    const led = state.led;
+    const families = led.families;
+    if (led.index >= families.length) {
+      showLedPane("led-step-none");
+      return;
+    }
+    led.phase = phase;
+    const family = families[led.index];
+    showLedPane("led-step-test");
+    $("#led-progress").textContent = `Fernbedienung ${led.index + 1} von ${families.length}`;
+    $("#led-progress-bar").style.width = `${(led.index / families.length) * 100}%`;
+    $("#led-family-info").textContent = `${family.buttons} Tasten · z. B. ${family.brands.slice(0, 2).join(", ")}`;
+    const step = LED_STEPS[phase];
+    $("#led-question").innerHTML = `Leuchtet dein LED-Strip jetzt <span class="led-word" style="color:${step.hex}">${step.word}</span>?`;
+    $("#led-target-swatch").style.background = step.hex;
+    $("#led-target-swatch").style.boxShadow = `0 0 22px 2px ${step.glow}`;
+    $("#led-back").disabled = led.index === 0 && phase === "red";
+    const run = ++led.sending;
+    if (phase === "red" && family.keys.includes("on")) {
+      await ledSend("on");
+      await new Promise((r) => setTimeout(r, 700));
+    }
+    if (run === led.sending) await ledSend(phase);
+  }
+
+  function answerLed(answer) {
+    const led = state.led;
+    const family = led.families[led.index];
+    if (answer === "yes") {
+      if (led.phase === "red" && family.keys.includes("green")) {
+        runLedFamily("green");
+        return;
+      }
+      $("#led-found-text").textContent = `Fernbedienung mit ${family.buttons} Tasten (passt auch zu ${family.remotes} Modellen, z. B. ${family.brands.slice(0, 3).join(", ")}).`;
+      showLedPane("led-step-found");
+      setTimeout(() => $("#led-name").select(), 50);
+      return;
+    }
+    led.index += 1;
+    runLedFamily("red");
+  }
+
+  async function importLedFamily(event) {
+    event.preventDefault();
+    const family = state.led.families[state.led.index];
+    const name = $("#led-name").value.trim() || "LED-Strip";
+    try {
+      const device = await api("api/irdb/import", { method: "POST", body: { path: family.path, name, icon: "led" } });
+      closeModal("#modal-led");
+      toast(`„${device.name}“ mit ${device.commands.length} Tasten übernommen`, "success");
+      await loadDevices();
+      setTimeout(() => openColorCheck(device.id), 300);
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  function bindLedEvents() {
+    $$("[data-action=open-led-finder]").forEach((b) => b.addEventListener("click", openLedFinder));
+    $$("[data-led-answer]").forEach((b) => b.addEventListener("click", () => answerLed(b.dataset.ledAnswer)));
+    $("#led-resend").addEventListener("click", () => runLedFamily(state.led.phase));
+    $("#led-back").addEventListener("click", () => {
+      const led = state.led;
+      if (led.phase === "green") runLedFamily("red");
+      else if (led.index > 0) { led.index -= 1; runLedFamily("red"); }
+    });
+    $("#led-continue").addEventListener("click", () => { state.led.index += 1; runLedFamily("red"); });
+    $("#led-restart").addEventListener("click", () => { state.led.index = 0; runLedFamily("red"); });
+    $("#led-step-found").addEventListener("submit", importLedFamily);
+  }
+
   // ------------------------------------------------------------------ Home Assistant
 
   let haTimer = null;
+  let haErrorShown = false;
 
   async function refreshHa() {
     try {
@@ -547,6 +832,10 @@
     }
     renderHa();
     render();
+    if (state.ha && state.ha.available && state.ha.error && !haErrorShown) {
+      haErrorShown = true;
+      toast(`Home Assistant: ${state.ha.error}`, "error");
+    }
     clearTimeout(haTimer);
     if (state.ha && state.ha.running) haTimer = setTimeout(refreshHa, 1500);
   }
@@ -668,6 +957,8 @@
     try {
       const data = await api(`api/irdb/search?${params}`);
       if (seq !== state.irdb.seq) return; // a newer search is running
+      const catObj = cat !== "" ? categoryById(Number(cat)) : null;
+      $("#led-finder-hint").classList.toggle("hidden", !((catObj && catObj.key === "light") || /\b(led|strip|licht|rgb)/i.test(q)));
       state.irdb.results = data.entries;
       if (state.irdb.selected && !data.entries.some((e) => e.path === state.irdb.selected.path)) clearIrdbSelection();
       renderIrdbResults(data.total);
@@ -1044,6 +1335,8 @@
     $$("#db-selected [data-test]").forEach((b) => b.addEventListener("click", () => testDbCode(b)));
     bindSmartirEvents();
     bindHaEvents();
+    bindColorEvents();
+    bindLedEvents();
     $("#btn-new-device").addEventListener("click", openNewDevice);
     $$("[data-action=new-device]").forEach((b) => b.addEventListener("click", openNewDevice));
     $("#form-device").addEventListener("submit", createDevice);
@@ -1098,6 +1391,9 @@
         case "smartir":
           openSmartir(deviceId);
           break;
+        case "color-check":
+          openColorCheck(deviceId);
+          break;
         case "toggle-more":
           if (state.expanded.has(deviceId)) state.expanded.delete(deviceId); else state.expanded.add(deviceId);
           render();
@@ -1131,8 +1427,9 @@
     });
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("DOMContentLoaded", async () => {
     bindEvents();
+    await loadPalette();
     loadDevices();
     refreshStatus();
     refreshHa();

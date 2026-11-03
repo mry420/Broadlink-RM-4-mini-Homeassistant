@@ -85,6 +85,22 @@ oben in der App siehst du den Status und kannst die Automatik abschalten.
 > Das Dashboard und die Skripte mit dem Präfix `ir_` werden von der App verwaltet –
 > Änderungen bitte in der App vornehmen, sonst werden sie beim nächsten Abgleich überschrieben.
 
+## LED-Strips – richtige Farben
+
+Viele LED-Strips sehen gleich aus, ihre Fernbedienungen senden aber unterschiedliche
+Farbcodes. Darum gibt es zwei Helfer:
+
+- **LED-Finder** (Neues Gerät → IR-Datenbank → Kategorie „LED & Licht“ → *LED-Finder starten*):
+  Die App schaltet den Strip ein und sendet „Rot“ – nacheinander für die 42 gängigen
+  LED-Fernbedienungen. Du antwortest nur „Ja / Andere Farbe / Nichts passiert“.
+  Passt eine, wird sie übernommen.
+- **Farben prüfen** (Paletten-Symbol auf der Gerätekarte): Die App sendet jede Farbtaste,
+  du tippst die Farbe an, die wirklich leuchtet. Namen werden korrigiert, Tasten ohne
+  Reaktion entfernt. Funktioniert auch mit selbst angelernten Fernbedienungen.
+
+In der Home-Assistant-Fernbedienung erscheinen die Farben als farbige Palette,
+Effekte (Fade, Strobe …) in einem eigenen Bereich.
+
 ## IR-Datenbank – Fernbedienungen ohne Anlernen
 
 Unter **Neues Gerät anlegen → IR-Datenbank** findest du rund 8.900 Fernbedienungen
