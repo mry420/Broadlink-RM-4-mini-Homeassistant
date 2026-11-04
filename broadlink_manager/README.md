@@ -85,6 +85,16 @@ oben in der App siehst du den Status und kannst die Automatik abschalten.
 > Das Dashboard und die Skripte mit dem Präfix `ir_` werden von der App verwaltet –
 > Änderungen bitte in der App vornehmen, sonst werden sie beim nächsten Abgleich überschrieben.
 
+## Viele Tasten am Stück anlernen
+
+Beim **Neues Gerät anlegen → Anlernen** gibt es „Tasten gleich nacheinander anlernen“:
+Vorlage wählen (z. B. **HDMI-Matrix 4×2**) oder eine eigene Liste eintragen, eine Taste
+pro Zeile. Die App führt dich durch alle Tasten – jeweils Taste drücken und
+„Speichern & weiter“. Mit „Überspringen“ lässt du eine Taste aus.
+
+Schreibweise **„Gruppe: Taste“** (z. B. `Out A: PlayStation`) sortiert die Tasten in der
+Home-Assistant-Fernbedienung in eigene Bereiche.
+
 ## LED-Strips – richtige Farben
 
 Viele LED-Strips sehen gleich aus, ihre Fernbedienungen senden aber unterschiedliche

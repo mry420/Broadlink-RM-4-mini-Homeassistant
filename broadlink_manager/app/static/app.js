@@ -18,6 +18,22 @@
     remote: { label: "Sonstiges", svg: '<rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="7" r="1.6"/><path d="M10 12h4M10 15.5h4M10 19h4"/>' },
   };
 
+  const SERIES_TEMPLATES = {
+    "": { label: "Eigene Liste", names: [] },
+    matrix42: {
+      label: "HDMI-Matrix 4×2",
+      icon: "receiver",
+      names: ["Power", "Audio: A↔B", "Audio: ARC", "Audio: Pass", "Audio: 2CH", "Audio: 5.1CH",
+        "Out A: HDMI 1", "Out A: HDMI 2", "Out A: HDMI 3", "Out A: HDMI 4", "Out A: An/Aus",
+        "Out B: HDMI 1", "Out B: HDMI 2", "Out B: HDMI 3", "Out B: HDMI 4", "Out B: An/Aus"],
+    },
+    switch41: { label: "HDMI-Switch 4×1", icon: "receiver", names: ["Power", "HDMI 1", "HDMI 2", "HDMI 3", "HDMI 4"] },
+    tv: { label: "TV (Grundfunktionen)", icon: "tv", names: ["Power", "Quelle", "Lauter", "Leiser", "Stumm", "Kanal +", "Kanal −", "Hoch", "Runter", "Links", "Rechts", "OK", "Zurück", "Menü", "Home"] },
+    soundbar: { label: "Soundbar", icon: "soundbar", names: ["Power", "Lauter", "Leiser", "Stumm", "Quelle", "Bluetooth", "HDMI ARC", "Optisch"] },
+    projector: { label: "Beamer", icon: "projector", names: ["Power", "Quelle", "Menü", "Hoch", "Runter", "Links", "Rechts", "OK", "Zurück"] },
+    led24: { label: "LED-Strip (24 Tasten)", icon: "led", names: ["An", "Aus", "Heller", "Dunkler", "Rot", "Grün", "Blau", "Weiß", "R1", "G1", "B1", "Flash", "R2", "G2", "B2", "Strobe", "R3", "G3", "B3", "Fade", "R4", "G4", "B4", "Smooth"] },
+  };
+
   const SUGGESTIONS = ["Power", "An", "Aus", "Volume Up", "Volume Down", "Mute", "Kanal +", "Kanal −", "Input", "OK", "Heller", "Dunkler"];
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -35,6 +51,7 @@
     ha: null,
     palette: {},
     led: { families: null, index: 0, phase: "red", sending: 0 },
+    batch: null,
     colorCheck: { deviceId: null, items: [], index: 0, answers: {} },
     irdb: { categories: null, icons: {}, results: [], selected: null, buttons: [], timer: null, seq: 0 },
   };
@@ -101,7 +118,15 @@
     if (modal.classList.contains("hidden")) return;
     modal.classList.remove("modal-open");
     setTimeout(() => modal.classList.add("hidden"), 150);
-    if (id === "#modal-learn") stopLearning(true);
+    if (id === "#modal-learn") {
+      stopLearning(true);
+      if (state.batch) {
+        const b = state.batch;
+        state.batch = null;
+        renderBatch();
+        if (b.done) toast(`${b.done} von ${b.names.length} Tasten angelernt`, "success");
+      }
+    }
     if (lastFocus && document.contains(lastFocus)) lastFocus.focus();
   }
 
@@ -242,6 +267,8 @@
       render();
       closeModal("#modal-device");
       toast(`„${device.name}“ angelegt`, "success");
+      const names = $("#series-names").value.split("\n").map((n) => n.trim()).filter(Boolean);
+      if (names.length) setTimeout(() => startSeries(device.id, names), 250);
     } catch (err) {
       toast(err.message, "error");
     }
@@ -304,9 +331,21 @@
     state.learn.timer = setInterval(tick, 200);
   }
 
+  async function requestLearn(signal) {
+    // A previous learn session may still be ending on the server (409) – retry briefly.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await api("api/learn", { method: "POST", body: { timeout: LEARN_TIMEOUT }, signal });
+      } catch (err) {
+        if (err.status !== 409 || attempt >= 8 || signal.aborted) throw err;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+  }
+
   async function startLearning() {
-    stopLearning(false);
     const l = state.learn;
+    stopLearning(Boolean(l.controller)); // cancel a still-running session on the server
     l.learnId = null;
     l.code = null;
     showLearnStep("learn-waiting");
@@ -314,11 +353,7 @@
     const controller = new AbortController();
     l.controller = controller;
     try {
-      const result = await api("api/learn", {
-        method: "POST",
-        body: { timeout: LEARN_TIMEOUT },
-        signal: controller.signal,
-      });
+      const result = await requestLearn(controller.signal);
       if (controller.signal.aborted || result.cancelled) return;
       l.learnId = result.learn_id;
       l.code = result.code;
@@ -348,6 +383,7 @@
     state.learn.slot = preset.slot || null;
     state.learn.source = Boolean(preset.source);
     state.learn.presetName = preset.name || "";
+    renderBatch();
     $("#learn-device-name").textContent = preset.label ? `${device.name} · ${preset.label}` : device.name;
     const existing = new Set((device.commands || []).map((c) => c.name.toLowerCase()));
     const box = $("#name-suggestions");
@@ -377,6 +413,12 @@
         body: { device_id: l.deviceId, name, learn_id: l.learnId, smartir_slot: l.slot, smartir_source: l.source },
       });
       l.learnId = null;
+      if (state.batch && state.batch.deviceId === l.deviceId) {
+        state.batch.done += 1;
+        await loadDevices();
+        nextInSeries(1);
+        return;
+      }
       closeModal("#modal-learn");
       toast(overwrite ? `„${name}“ aktualisiert` : `„${name}“ gespeichert`, "success");
       await loadDevices();
@@ -384,6 +426,44 @@
     } catch (err) {
       toast(err.message, "error");
     }
+  }
+
+  // --- series learning ---
+
+  function startSeries(deviceId, names) {
+    state.batch = { deviceId, names, index: 0, done: 0 };
+    openLearnModal(deviceId, { name: names[0] });
+    renderBatch();
+  }
+
+  function renderBatch() {
+    const b = state.batch;
+    $("#learn-batch").classList.toggle("hidden", !b);
+    if (!b) return;
+    $("#learn-batch-progress").textContent = `Taste ${b.index + 1} von ${b.names.length}`;
+    $("#learn-batch-bar").style.width = `${(b.index / b.names.length) * 100}%`;
+    $("#learn-batch-name").textContent = b.names[b.index];
+    $("#learn-save").textContent = b.index + 1 < b.names.length ? "Speichern & weiter" : "Speichern & fertig";
+  }
+
+  function nextInSeries(step) {
+    const b = state.batch;
+    b.index += step;
+    if (b.index >= b.names.length) {
+      finishSeries();
+      return;
+    }
+    state.learn.presetName = b.names[b.index];
+    renderBatch();
+    startLearning();
+  }
+
+  function finishSeries() {
+    const b = state.batch;
+    state.batch = null;
+    closeModal("#modal-learn");
+    renderBatch();
+    if (b) toast(`${b.done} von ${b.names.length} Tasten angelernt`, "success");
   }
 
   async function testLearned() {
@@ -1356,6 +1436,19 @@
     $("#learn-again").addEventListener("click", startLearning);
     $("#learn-test").addEventListener("click", testLearned);
     $("#learn-success").addEventListener("submit", saveLearned);
+    $("#learn-batch-skip").addEventListener("click", () => { if (state.batch) nextInSeries(1); });
+    $("#learn-batch-stop").addEventListener("click", finishSeries);
+    const tplSelect = $("#series-template");
+    for (const [key, tpl] of Object.entries(SERIES_TEMPLATES)) tplSelect.appendChild(new Option(tpl.label, key));
+    tplSelect.addEventListener("change", () => {
+      const tpl = SERIES_TEMPLATES[tplSelect.value];
+      $("#series-names").value = tpl.names.join("\n");
+      if (tpl.icon) {
+        const radio = $(`#icon-picker input[value=${tpl.icon}]`);
+        if (radio) radio.checked = true;
+      }
+      if (!$("#device-name").value.trim() && tplSelect.value) $("#device-name").value = tpl.label.replace(/ \(.*\)/, "");
+    });
 
     $("#confirm-ok").addEventListener("click", async () => {
       const action = state.confirmAction;

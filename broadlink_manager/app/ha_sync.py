@@ -95,7 +95,19 @@ def button_role(name: str) -> str:
     return "other"
 
 
+_NAME_ICONS = {
+    "a↔b": "mdi:swap-horizontal", "a<->b": "mdi:swap-horizontal", "a-b": "mdi:swap-horizontal",
+    "arc": "mdi:speaker", "earc": "mdi:speaker", "hdmi arc": "mdi:speaker",
+    "pass": "mdi:surround-sound", "passthrough": "mdi:surround-sound",
+    "2ch": "mdi:surround-sound-2-0", "5.1ch": "mdi:surround-sound-5-1", "7.1ch": "mdi:surround-sound-7-1",
+    "bluetooth": "mdi:bluetooth", "optisch": "mdi:toslink", "optical": "mdi:toslink",
+}
+
+
 def button_icon(name: str, role: str) -> str:
+    special = _NAME_ICONS.get(name.strip().lower())
+    if special:
+        return special
     if role == "digit":
         return _DIGIT_ICONS.get(re.sub(r"\D", "", name)[-1:], "mdi:numeric")
     return _ICONS.get(role, "mdi:remote")
@@ -199,8 +211,14 @@ def build_remote_view(device: Dict[str, Any]) -> Dict[str, Any]:
     is_led = device.get("icon") in ("led", "light") or sum(1 for v in color_of.values() if v) >= 3
     color_items: List[Tuple[str, str, str]] = []
     mode_cards: List[Dict[str, Any]] = []
+    groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
     for command in commands:
         entity = f"script.{script_id(device['id'], command['id'])}"
+        prefix, sep, label = command["name"].partition(":")
+        if sep and prefix.strip() and label.strip():  # "Out A: HDMI 1" → own section "Out A"
+            role = button_role(label.strip())
+            groups.setdefault(prefix.strip(), []).append((role, _button(entity, label.strip(), button_icon(label.strip(), role))))
+            continue
         if is_led and color_of[command["id"]]:
             color_items.append((entity, command["name"], color_of[command["id"]]))
             continue
@@ -264,6 +282,15 @@ def build_remote_view(device: Dict[str, Any]) -> Dict[str, Any]:
         by_digit = {re.sub(r"\D", "", c["name"])[-1:]: c for c in digits}
         cells = [by_digit.get(str(i)) or _BLANK for i in range(1, 10)] + [_BLANK, by_digit.get("0") or _BLANK, _BLANK]
         cards.append(_grid(cells, 3))
+
+    for title, items in groups.items():
+        cards.append({"type": "heading", "heading": title, "heading_style": "subtitle", "grid_options": {"columns": "full"}})
+        switch = [c for role, c in items if role in ("power", "on", "off")]
+        others = [c for role, c in items if role not in ("power", "on", "off")]
+        if switch:
+            cards.append(_grid(switch, len(switch)))
+        if others:
+            cards.append(_grid(others, min(4, len(others))))
 
     sources = buttons.pop("source", [])
     if sources:

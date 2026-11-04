@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0
+
+- Serien-Anlernen: beim Anlegen eines Geräts eine Tastenliste angeben (oder eine
+  Vorlage wählen) – die App führt Taste für Taste durch, Name ist schon ausgefüllt
+- Vorlagen: HDMI-Matrix 4×2, HDMI-Switch 4×1, TV, Soundbar, Beamer, LED-Strip (24 Tasten)
+- Tasten im Format „Gruppe: Taste“ (z. B. „Out A: HDMI 1“) bekommen in der
+  Home-Assistant-Fernbedienung eigene Bereiche
+- Passende Symbole für Audio-Tasten (A↔B, ARC, 2CH, 5.1CH …)
+- Behoben: Überspringen während des Wartens auf ein Signal brach das nächste Anlernen ab
+
 ## 1.4.0
 
 - LED-Finder: testet die 42 gängigen LED-Fernbedienungs-Familien nacheinander

@@ -134,6 +134,16 @@
         <input id="device-name" name="name" data-autofocus class="input mt-1" maxlength="60" placeholder="z. B. TV Wohnzimmer" required>
         <p class="mt-4 text-sm text-ha-muted">Symbol</p>
         <div id="icon-picker" class="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-5" role="radiogroup" aria-label="Symbol"></div>
+        <details id="series-box" class="series-box mt-5">
+          <summary class="cursor-pointer select-none text-sm"><strong>Tasten gleich nacheinander anlernen</strong> <span class="text-ha-muted">(optional)</span></summary>
+          <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <label class="text-sm text-ha-muted" for="series-template">Vorlage</label>
+            <select id="series-template" class="input select sm:flex-1"></select>
+          </div>
+          <label class="mt-3 block text-sm text-ha-muted" for="series-names">Tasten – eine pro Zeile. Mit „Gruppe: Taste“ entstehen in Home Assistant eigene Bereiche.</label>
+          <textarea id="series-names" class="input mt-1 h-40 font-mono text-sm" spellcheck="false" placeholder="Power&#10;Out A: HDMI 1&#10;Out A: HDMI 2"></textarea>
+          <p class="mt-1 text-xs text-ha-muted">Tipp: Benenne die Eingänge nach deinen Geräten, z. B. „Out A: PlayStation“.</p>
+        </details>
         <div class="mt-6 flex justify-end gap-2">
           <button type="button" class="btn btn-ghost" data-close>Abbrechen</button>
           <button type="submit" class="btn btn-primary">Anlegen</button>
@@ -267,6 +277,14 @@
     <div tabindex="-1" class="modal-panel">
       <h2 id="modal-learn-title" class="text-lg font-semibold">Taste anlernen</h2>
       <p class="text-sm text-ha-muted">Gerät: <span id="learn-device-name" class="text-ha-text"></span></p>
+      <div id="learn-batch" class="batch-box mt-3 hidden">
+        <div class="flex items-center justify-between text-xs text-ha-muted">
+          <span id="learn-batch-progress"></span>
+          <span><button type="button" id="learn-batch-skip" class="link-btn">Überspringen</button> · <button type="button" id="learn-batch-stop" class="link-btn">Beenden</button></span>
+        </div>
+        <div class="led-progress-bar mt-1"><span id="learn-batch-bar"></span></div>
+        <p class="mt-2 text-base">Jetzt drücken: <strong id="learn-batch-name"></strong></p>
+      </div>
 
       <!-- Step: waiting -->
       <div id="learn-waiting" class="learn-step mt-6 flex flex-col items-center text-center">
@@ -300,7 +318,7 @@
         <div class="mt-6 flex flex-wrap justify-end gap-2">
           <button type="button" id="learn-test" class="btn btn-ghost">Testen</button>
           <button type="button" id="learn-retry" class="btn btn-ghost">Neu anlernen</button>
-          <button type="submit" class="btn btn-primary">Speichern</button>
+          <button type="submit" class="btn btn-primary" id="learn-save">Speichern</button>
         </div>
       </form>
 
