@@ -1,5 +1,5 @@
 name: "Broadlink IR Manager"
-version: "2.0.0"
+version: "2.1.0"
 slug: "broadlink_manager"
 description: "Einfache Benutzeroberfläche zum Anlernen und Verwalten von Broadlink RM4 mini IR-Codes"
 url: "https://github.com/mry420/Broadlink-RM-4-mini-Homeassistant"

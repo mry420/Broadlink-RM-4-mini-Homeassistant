@@ -1666,7 +1666,45 @@
     state.editDeviceId = deviceId;
     $("#edit-device-name").value = device.name;
     buildPicker($("#edit-icon-picker"), device.icon || "remote");
+    $("#edit-inputs-box").classList.add("hidden");
     openModal("#modal-edit-device");
+    loadEditInputs(deviceId);
+  }
+
+  async function loadEditInputs(deviceId) {
+    try {
+      const spec = await api(`api/devices/${encodeURIComponent(deviceId)}/layout`);
+      const inputs = [];
+      for (const g of Object.values(spec.state.groups || {})) {
+        if (g.select) g.options.forEach((o) => { if (!inputs.includes(o)) inputs.push(o); });
+      }
+      const box = $("#edit-inputs");
+      box.replaceChildren();
+      inputs.forEach((name, i) => {
+        const label = document.createElement("label");
+        label.textContent = `Eingang ${i + 1}`;
+        label.htmlFor = `edit-input-${i}`;
+        const input = document.createElement("input");
+        input.className = "input";
+        input.id = `edit-input-${i}`;
+        input.maxLength = 40;
+        input.value = name;
+        input.dataset.original = name;
+        box.append(label, input);
+      });
+      $("#edit-inputs-box").classList.toggle("hidden", !inputs.length);
+    } catch (_) { /* optional section */ }
+  }
+
+  async function suggestScenes(deviceIds) {
+    const created = [];
+    for (const id of deviceIds) {
+      try {
+        created.push(...(await api(`api/devices/${encodeURIComponent(id)}/suggest-scenes`, { method: "POST" })).created);
+      } catch (_) { /* device without inputs */ }
+    }
+    toast(created.length ? `${created.length} Szenen angelegt: ${created.join(", ")}` : "Keine neuen Vorschläge – Szenen gibt es schon oder es fehlen Eingänge wie „Out A: PC“.", created.length ? "success" : "info");
+    return created;
   }
 
   async function saveEditDevice(event) {
@@ -1675,6 +1713,9 @@
     const icon = ($("#edit-icon-picker input:checked") || {}).value;
     try {
       await api(`api/devices/${encodeURIComponent(id)}`, { method: "PUT", body: { name: $("#edit-device-name").value.trim(), icon } });
+      const mapping = {};
+      $$("#edit-inputs input").forEach((i) => { if (i.value.trim() && i.value.trim() !== i.dataset.original) mapping[i.dataset.original] = i.value.trim(); });
+      if (Object.keys(mapping).length) await api(`api/devices/${encodeURIComponent(id)}/rename-inputs`, { method: "POST", body: { mapping } });
       closeModal("#modal-edit-device");
       toast("Gerät gespeichert", "success");
       await loadDevices();
@@ -1928,6 +1969,15 @@
 
   function bindSceneEvents() {
     $("#btn-new-scene").addEventListener("click", () => openSceneEditor(null));
+    $("#btn-suggest-scenes").addEventListener("click", async () => {
+      await suggestScenes(state.devices.map((d) => d.id));
+      await loadScenes();
+    });
+    $("#edit-suggest-scenes").addEventListener("click", async () => {
+      const id = state.editDeviceId;
+      await saveEditDevice({ preventDefault() {} }); // apply renamed inputs first
+      if ((await suggestScenes([id])).length) showView("scenes");
+    });
     $$("[data-action=new-scene]").forEach((b) => b.addEventListener("click", () => openSceneEditor(null)));
     $("#scene-add-step").addEventListener("click", () => { addSceneStep(); renderSceneSteps(); });
     $("#form-scene").addEventListener("submit", (e) => { e.preventDefault(); saveScene(false); });

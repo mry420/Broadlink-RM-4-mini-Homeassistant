@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.0
+
+- Eingänge benennen: unter „Gerät bearbeiten“ einmal eintragen, was an HDMI 1–4 hängt –
+  die Tasten aller Ausgänge werden umbenannt („Out A/B: HDMI 3“ → „Out A/B: PlayStation“)
+- Szenen-Vorschläge: pro Eingang eine Szene, die alle Ausgänge auf diesen Eingang schaltet
+
 ## 2.0.0
 
 - **Neue App-Oberfläche** mit Bereichen *Geräte*, *Szenen* und *Einstellungen*

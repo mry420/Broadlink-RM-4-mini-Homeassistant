@@ -404,6 +404,10 @@ body {
 .rbtn-color { gap: 0.35rem; }
 .rbtn-swatch { width: 1.8rem; height: 1.8rem; border-radius: 50%; background: var(--swatch); box-shadow: 0 0 14px -2px var(--swatch); }
 
+.inputs-grid { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 0.75rem; align-items: center; }
+.inputs-grid label { font-size: 0.8125rem; color: var(--ha-muted); white-space: nowrap; }
+.inputs-grid .input { min-height: 2.3rem; padding-top: 0.35rem; padding-bottom: 0.35rem; }
+
 /* ---------- Scenes ---------- */
 .scene-card { display: flex; flex-direction: column; padding: 1rem 1.1rem; border-radius: 16px; border: 1px solid var(--ha-border); background: var(--ha-card); }
 .scene-icon { display: flex; align-items: center; justify-content: center; width: 2.6rem; height: 2.6rem; border-radius: 12px; background: rgb(3 169 244 / 0.15); color: var(--ha-primary); }

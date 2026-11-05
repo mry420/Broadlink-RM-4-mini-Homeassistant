@@ -38,7 +38,7 @@ import smartir
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"
@@ -1524,3 +1524,78 @@ def api_restore(body: RestoreBody) -> Dict[str, Any]:
         save_store(data)
     log.info("Sicherung wiederhergestellt: %d Geräte, %d Szenen.", len(body.devices), len(data["scenes"]))
     return {"devices": len(body.devices), "scenes": len(data["scenes"])}
+
+
+# --------------------------------------------------------------------------
+# Inputs: rename across outputs, scene suggestions
+# --------------------------------------------------------------------------
+
+
+class InputRename(BaseModel):
+    mapping: Dict[str, str]  # old input label → new label
+
+
+@app.post("/api/devices/{device_id}/rename-inputs")
+def api_rename_inputs(device_id: str, body: InputRename) -> Dict[str, Any]:
+    """Rename an input on every output at once ('Out A: HDMI 1' + 'Out B: HDMI 1' → '…: PC')."""
+    mapping = {k.strip(): v.strip() for k, v in body.mapping.items() if k.strip() and v.strip() and k.strip() != v.strip()}
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        renamed = 0
+        for command in device.get("commands", []):
+            group, label = layout.split_group(command["name"])
+            if label not in mapping:
+                continue
+            new_name = f"{group}: {mapping[label]}" if group else mapping[label]
+            if any(c["name"].lower() == new_name.lower() and c is not command for c in device["commands"]):
+                raise HTTPException(status_code=409, detail=f"Es gibt schon eine Taste „{new_name}“.")
+            command["name"] = new_name
+            command["updated"] = _now()
+            renamed += 1
+        # Keep the remembered state readable
+        with _state_lock:
+            state = _read_state()
+            for g in state.get(device_id, {}).get("groups", {}).values():
+                if g.get("value") in mapping:
+                    g["value"] = mapping[g["value"]]
+            _write_state(state)
+        _sync_smartir(device, data)
+        save_store(data)
+    log.info("Eingänge umbenannt (%s): %d Tasten.", device["name"], renamed)
+    return {"renamed": renamed}
+
+
+@app.post("/api/devices/{device_id}/suggest-scenes")
+def api_suggest_scenes(device_id: str) -> Dict[str, Any]:
+    """One scene per input that switches all outputs of the device to that input."""
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        model = layout.state_model(device)
+        select_groups = [g for g, e in model["groups"].items() if e["select"]]
+        if not select_groups:
+            raise HTTPException(status_code=400, detail="Dieses Gerät hat keine Eingänge mit Ausgängen (z. B. „Out A: PC“).")
+        by_name = {c["name"]: c for c in device["commands"]}
+        scenes = data.setdefault("scenes", [])
+        existing = {s["name"].lower() for s in scenes}
+        options: List[str] = []
+        for g in select_groups:
+            options += [o for o in model["groups"][g]["options"] if o not in options]
+        created = []
+        for option in options:
+            steps = []
+            for g in select_groups:
+                command = by_name.get(f"{g}: {option}") if g != "Eingang" else by_name.get(option)
+                if command:
+                    steps.append({"device_id": device_id, "command_id": command["id"], "repeat": 1, "delay": 0.4})
+            name = f"{option} ({device['name']})" if option.lower() in existing else option
+            if not steps or name.lower() in existing:
+                continue
+            scene = {"id": _unique_id(_slugify(name), [s["id"] for s in scenes]), "name": name, "icon": "movie",
+                     "steps": steps, "created": _now()}
+            scenes.append(scene)
+            existing.add(name.lower())
+            created.append(name)
+        save_store(data)
+    return {"created": created}
