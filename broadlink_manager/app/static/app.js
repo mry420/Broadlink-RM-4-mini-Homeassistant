@@ -1892,6 +1892,56 @@
     openModal("#modal-scene");
   }
 
+  // --- Kino-Modus assistant: builds a scene from the existing devices ---
+
+  const POWER_NAME = /^(power|an|ein|on|power on|einschalten)$/i;
+
+  function findCommand(device, test) {
+    return device && (device.commands || []).find((c) => test(c.name));
+  }
+
+  function buildKinoSteps(preferredInput) {
+    const steps = [];
+    const notes = [];
+    const projector = state.devices.find((d) => d.icon === "projector" || /beamer|projektor|projector/i.test(d.name));
+    const projectorPower = findCommand(projector, (n) => POWER_NAME.test(n.trim()));
+    if (projectorPower) {
+      steps.push({ device_id: projector.id, command_id: projectorPower.id, repeat: 1, delay: 20 });
+    } else {
+      notes.push("kein Beamer mit Power-Taste gefunden");
+    }
+    const matrix = state.devices.find((d) => (d.commands || []).some((c) => /^out\s*[a-z0-9]+\s*:/i.test(c.name)));
+    if (matrix) {
+      const outputs = [...new Set(matrix.commands.map((c) => (/^(out\s*[a-z0-9]+)\s*:/i.exec(c.name) || [])[1]).filter(Boolean))];
+      const inputs = [...new Set(matrix.commands.map((c) => (/^out\s*[a-z0-9]+\s*:\s*(.+)$/i.exec(c.name) || [])[1]).filter((n) => n && !/an\/aus|on\/off|power/i.test(n)))];
+      const input = inputs.find((i) => i.toLowerCase() === (preferredInput || "playstation").toLowerCase()) || inputs[0];
+      for (const out of outputs) {
+        const cmd = findCommand(matrix, (n) => n.toLowerCase() === `${out}: ${input}`.toLowerCase());
+        if (cmd) steps.push({ device_id: matrix.id, command_id: cmd.id, repeat: 1, delay: 0.5 });
+      }
+      const surround = findCommand(matrix, (n) => /5\.1/.test(n));
+      if (surround) steps.push({ device_id: matrix.id, command_id: surround.id, repeat: 1, delay: 0.5 });
+    } else {
+      notes.push("keine HDMI-Matrix mit „Out A: …“-Tasten gefunden");
+    }
+    return { steps, notes };
+  }
+
+  function openKinoAssistant() {
+    const { steps, notes } = buildKinoSteps("PlayStation");
+    if (!steps.length) {
+      toast(`Kino-Modus: ${notes.join(", ")}. Lege die Geräte zuerst an.`, "error");
+      return;
+    }
+    const existing = state.scenes.find((s) => s.name.toLowerCase() === "kino-modus");
+    state.sceneEdit = { id: existing ? existing.id : null, steps };
+    $("#scene-title").textContent = existing ? "Kino-Modus aktualisieren" : "Kino-Modus";
+    $("#scene-name").value = "Kino-Modus";
+    renderSceneSteps();
+    openModal("#modal-scene");
+    if (notes.length) toast(`Hinweis: ${notes.join(", ")}.`, "info");
+  }
+
   function addSceneStep() {
     const withButtons = state.devices.filter((d) => (d.commands || []).length);
     const last = state.sceneEdit.steps[state.sceneEdit.steps.length - 1];
@@ -1969,6 +2019,7 @@
 
   function bindSceneEvents() {
     $("#btn-new-scene").addEventListener("click", () => openSceneEditor(null));
+    $("#btn-kino").addEventListener("click", openKinoAssistant);
     $("#btn-suggest-scenes").addEventListener("click", async () => {
       await suggestScenes(state.devices.map((d) => d.id));
       await loadScenes();

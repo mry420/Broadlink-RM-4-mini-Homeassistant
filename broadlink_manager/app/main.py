@@ -38,7 +38,7 @@ import smartir
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.2.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"

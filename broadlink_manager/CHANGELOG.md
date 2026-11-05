@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.0
+
+- Kino-Modus-Assistent (Szenen → „🎬 Kino-Modus“): baut die Szene aus den vorhandenen
+  Geräten – Beamer einschalten (20 s warten), PlayStation auf alle Matrix-Ausgänge,
+  Ton auf 5.1. Vor dem Speichern frei anpassbar
+
 ## 2.1.0
 
 - Eingänge benennen: unter „Gerät bearbeiten“ einmal eintragen, was an HDMI 1–4 hängt –
