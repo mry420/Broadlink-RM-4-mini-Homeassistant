@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.0.0
+
+- **Neue App-Oberfläche** mit Bereichen *Geräte*, *Szenen* und *Einstellungen*
+- **Fernbedienung in der App:** Tipp auf ein Gerät öffnet eine echte Fernbedienung
+  (Power, Steuerkreuz, Lautstärke-/Kanalwippe, Ziffern, Farben, Gruppen wie „Out A“)
+- **Statusanzeige:** Die App merkt sich, ob ein Gerät/Ausgang an ist und welcher
+  Eingang aktiv ist (z. B. „Out A: PlayStation“) – auf der Gerätekarte, in der
+  Fernbedienung und in Home Assistant (eigene Status-Helfer, auch bei Bedienung aus HA).
+  Ein Tipp auf den Status korrigiert ihn, falls das Gerät von Hand bedient wurde
+- **Szenen:** mehrere Tasten über Geräte hinweg mit Wiederholung und Pausen,
+  z. B. „Kino-Modus“ – in der App und als Skript/Dashboard-Ansicht in Home Assistant
+- **Bearbeiten:** Gerät umbenennen und Symbol ändern, Tasten umbenennen, Farbe setzen,
+  neu anlernen, löschen
+- **Sicherung:** alle Geräte, Tasten und Szenen als Datei herunterladen und wiederherstellen
+- Einstellungen-Seite mit Home-Assistant-Status, RM4-mini-Infos, YAML-Export
+
 ## 1.5.0
 
 - Serien-Anlernen: beim Anlegen eines Geräts eine Tastenliste angeben (oder eine

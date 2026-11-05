@@ -52,6 +52,14 @@
     palette: {},
     led: { families: null, index: 0, phase: "red", sending: 0 },
     batch: null,
+    deviceState: {},
+    remote: null,
+    rm: null,
+    scenes: [],
+    sceneRunning: {},
+    sceneEdit: null,
+    editDeviceId: null,
+    editCommand: null,
     colorCheck: { deviceId: null, items: [], index: 0, answers: {} },
     irdb: { categories: null, icons: {}, results: [], selected: null, buttons: [], timer: null, seq: 0 },
   };
@@ -158,6 +166,7 @@
     $("#status-text").textContent = "Verbinde …";
     try {
       const s = await api("api/status");
+      state.rm = s;
       if (s.ip) $("#status-ip").textContent = s.ip;
       if (s.connected) {
         pill.dataset.state = "ok";
@@ -210,9 +219,8 @@
       const coloured = commands.filter((c) => c.display_color).length;
       $(".color-check-btn", card).classList.toggle("hidden", !(isLedDevice(device) && commands.length) && coloured < 2);
       const sir = device.smartir;
-      const sirBtn = $(".smartir-btn", card);
-      sirBtn.dataset.state = sir ? (sir.installed ? "installed" : "configured") : "none";
-      sirBtn.title = sir ? (sir.installed ? `SmartIR installiert (Code ${sir.code})` : `SmartIR eingerichtet (Code ${sir.code}), noch nicht installiert`) : "Als SmartIR-Gerät in Home Assistant nutzen";
+      $(".device-count", card).textContent += sir && sir.installed ? " · SmartIR" : "";
+      renderDeviceState(card, device.id);
 
       const list = $(".command-list", card);
       const expanded = state.expanded.has(device.id);
@@ -286,6 +294,7 @@
     button.classList.add("is-busy");
     try {
       await api("api/send", { method: "POST", body: { device_id: deviceId, command_id: commandId } });
+      scheduleStateRefresh();
       button.classList.add("is-sent");
       setTimeout(() => button.classList.remove("is-sent"), 900);
     } catch (err) {
@@ -963,6 +972,7 @@
     for (const entity of options) {
       if (entity) select.appendChild(new Option(entity, entity, false, entity === ((ha && ha.remote_entity) || state.settings.remote_entity)));
     }
+    if (!$("#view-settings").classList.contains("hidden")) renderSettings();
     $("#ha-auto").checked = !ha || ha.auto !== false;
     $("#ha-auto").disabled = !ha || !ha.available;
     $("#ha-sync").disabled = !ha || !ha.available;
@@ -1384,6 +1394,624 @@
     });
   }
 
+  // ------------------------------------------------------------------ views
+
+  function showView(view) {
+    const valid = ["devices", "scenes", "settings"].includes(view) ? view : "devices";
+    $$(".app-view").forEach((v) => v.classList.toggle("hidden", v.id !== `view-${valid}`));
+    $$(".nav-tab").forEach((t) => {
+      if (t.dataset.view === valid) t.setAttribute("aria-current", "page");
+      else t.removeAttribute("aria-current");
+    });
+    try { localStorage.setItem("blm.view", valid); } catch (_) { /* storage blocked */ }
+    if (valid === "scenes") loadScenes();
+    if (valid === "settings") renderSettings();
+  }
+
+  // ------------------------------------------------------------------ device state
+
+  let stateTimer = null;
+
+  async function refreshDeviceState() {
+    try {
+      state.deviceState = (await api("api/state")).devices || {};
+    } catch (_) {
+      return;
+    }
+    $$("#device-grid [data-device-id]").forEach((card) => renderDeviceState(card, card.dataset.deviceId));
+    if (isOpen("#modal-remote")) renderRemoteState();
+  }
+
+  function scheduleStateRefresh(delay = 400) {
+    clearTimeout(stateTimer);
+    stateTimer = setTimeout(refreshDeviceState, delay);
+  }
+
+  function stateChips(deviceId) {
+    const st = state.deviceState[deviceId];
+    if (!st) return [];
+    const chips = [];
+    if (st.power !== null && st.power !== undefined) chips.push({ text: st.power ? "An" : "Aus", on: st.power, kind: "power" });
+    for (const [group, g] of Object.entries(st.groups || {})) {
+      const parts = [];
+      if (g.power !== null && g.power !== undefined) parts.push(g.power ? "an" : "aus");
+      if (g.value) parts.push(g.value);
+      if (parts.length) chips.push({ text: `${group}: ${parts.join(" · ")}`, on: g.power !== false, kind: "group", group });
+    }
+    return chips;
+  }
+
+  function renderDeviceState(card, deviceId) {
+    const box = $(".device-state", card);
+    if (!box) return;
+    const chips = stateChips(deviceId);
+    box.classList.toggle("hidden", !chips.length);
+    box.replaceChildren(...chips.map((c) => {
+      const span = document.createElement("span");
+      span.className = "state-chip";
+      span.dataset.on = String(c.on);
+      span.textContent = c.text;
+      return span;
+    }));
+  }
+
+  // ------------------------------------------------------------------ remote view
+
+  const MDI = {
+    "mdi:power": '<path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>',
+    "mdi:power-on": '<path d="M12 3v9"/><path d="M6.4 6.4a8 8 0 1 0 11.2 0"/>',
+    "mdi:power-off": '<circle cx="12" cy="12" r="8"/>',
+    "mdi:volume-plus": '<path d="M4 9v6h4l5 4V5L8 9Z"/><path d="M17 12h5M19.5 9.5v5"/>',
+    "mdi:volume-minus": '<path d="M4 9v6h4l5 4V5L8 9Z"/><path d="M17 12h5"/>',
+    "mdi:volume-mute": '<path d="M4 9v6h4l5 4V5L8 9Z"/><path d="m17 9 5 6M22 9l-5 6"/>',
+    "mdi:chevron-up": '<path d="m6 15 6-6 6 6"/>',
+    "mdi:chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    "mdi:chevron-left": '<path d="m15 6-6 6 6 6"/>',
+    "mdi:chevron-right": '<path d="m9 6 6 6-6 6"/>',
+    "mdi:chevron-double-up": '<path d="m6 13 6-6 6 6M6 19l6-6 6 6"/>',
+    "mdi:chevron-double-down": '<path d="m6 5 6 6 6-6M6 11l6 6 6-6"/>',
+    "mdi:checkbox-blank-circle": '<circle cx="12" cy="12" r="6" fill="currentColor"/>',
+    "mdi:menu": '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    "mdi:cog": '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/>',
+    "mdi:arrow-u-left-top": '<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+    "mdi:home": '<path d="m3 11 9-8 9 8"/><path d="M5 10v10h14V10"/>',
+    "mdi:exit-to-app": '<path d="M14 4h5a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-5"/><path d="m10 16 4-4-4-4M14 12H4"/>',
+    "mdi:information-outline": '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/>',
+    "mdi:import": '<path d="M14 4h5a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1h-5"/><path d="m10 16 4-4-4-4M14 12H3"/>',
+    "mdi:play": '<path d="M7 4.5v15l12-7.5Z" fill="currentColor"/>',
+    "mdi:pause": '<path d="M8 5v14M16 5v14"/>',
+    "mdi:stop": '<rect x="6" y="6" width="12" height="12" rx="1"/>',
+    "mdi:rewind": '<path d="m11 6-7 6 7 6ZM20 6l-7 6 7 6Z"/>',
+    "mdi:fast-forward": '<path d="m13 6 7 6-7 6ZM4 6l7 6-7 6Z"/>',
+    "mdi:skip-next": '<path d="m6 6 9 6-9 6ZM18 6v12"/>',
+    "mdi:skip-previous": '<path d="m18 6-9 6 9 6ZM6 6v12"/>',
+    "mdi:record": '<circle cx="12" cy="12" r="6" fill="currentColor"/>',
+    "mdi:brightness-7": '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M5 19l1.5-1.5M17.5 6.5 19 5"/>',
+    "mdi:brightness-5": '<circle cx="12" cy="12" r="4"/><path d="M12 5v1M12 18v1M5 12h1M18 12h1"/>',
+    "mdi:swap-horizontal": '<path d="M4 8h14l-4-4M20 16H6l4 4"/>',
+    "mdi:speaker": '<rect x="6" y="3" width="12" height="18" rx="2"/><circle cx="12" cy="14" r="3"/><path d="M12 7v.01"/>',
+    "mdi:surround-sound": '<circle cx="12" cy="12" r="3"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/>',
+    "mdi:auto-fix": '<path d="m4 20 12-12M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1Z"/>',
+    "mdi:remote": '<rect x="7" y="2" width="10" height="20" rx="3"/><circle cx="12" cy="7" r="1.6"/><path d="M10 12h4M10 15.5h4"/>',
+    "mdi:bluetooth": '<path d="m7 7 10 10-5 4V3l5 4L7 17"/>',
+    "mdi:weather-night": '<path d="M20 15A8 8 0 0 1 9 4a8 8 0 1 0 11 11Z"/>',
+  };
+  const TEXT_ICONS = { "mdi:surround-sound-2-0": "2.0", "mdi:surround-sound-5-1": "5.1", "mdi:surround-sound-7-1": "7.1" };
+
+  function mdiSvg(icon) {
+    if (TEXT_ICONS[icon]) return `<span class="rbtn-text-icon">${TEXT_ICONS[icon]}</span>`;
+    const digit = /^mdi:numeric-(\d)$/.exec(icon || "");
+    if (digit) return `<span class="rbtn-digit">${digit[1]}</span>`;
+    const path = MDI[icon];
+    return path ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>` : "";
+  }
+
+  async function openRemote(deviceId) {
+    const device = deviceById(deviceId);
+    if (!device) return;
+    if (!(device.commands || []).length) {
+      openLearnModal(deviceId);
+      return;
+    }
+    state.remote = { deviceId, layout: null };
+    $("#remote-title").textContent = device.name;
+    $("#remote-icon").innerHTML = iconSvg(device.icon, "h-5 w-5");
+    $("#remote-body").innerHTML = '<p class="py-10 text-center text-sm text-ha-muted">Lade …</p>';
+    openModal("#modal-remote");
+    try {
+      state.remote.layout = await api(`api/devices/${encodeURIComponent(deviceId)}/layout`);
+      renderRemote();
+      refreshDeviceState();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  function remoteButton(item, extraClass = "") {
+    if (!item) {
+      const blank = document.createElement("div");
+      blank.className = "rbtn-blank";
+      return blank;
+    }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `rbtn ${extraClass}`.trim();
+    b.dataset.commandId = item.command_id;
+    b.dataset.role = item.role;
+    if (item.color && state.palette[item.color]) {
+      b.classList.add("rbtn-color");
+      b.style.setProperty("--swatch", state.palette[item.color].hex);
+      b.innerHTML = '<span class="rbtn-swatch"></span><span class="rbtn-label"></span>';
+    } else {
+      b.innerHTML = `${mdiSvg(item.icon)}<span class="rbtn-label"></span>`;
+    }
+    $(".rbtn-label", b).textContent = item.label;
+    b.title = item.label;
+    return b;
+  }
+
+  function remoteGrid(items, columns, cls = "") {
+    const grid = document.createElement("div");
+    grid.className = `rgrid ${cls}`.trim();
+    grid.style.setProperty("--cols", String(Math.max(1, columns)));
+    items.forEach((item) => grid.appendChild(remoteButton(item, item && item.role === "power" ? "rbtn-power" : "")));
+    return grid;
+  }
+
+  function renderRemote() {
+    const spec = state.remote && state.remote.layout;
+    if (!spec) return;
+    const body = $("#remote-body");
+    body.replaceChildren();
+    for (const section of spec.sections) {
+      const wrap = document.createElement("section");
+      wrap.className = `rsection rsection-${section.kind}`;
+      if (section.group) wrap.dataset.group = section.group;
+      if (section.title) {
+        const h = document.createElement("h3");
+        h.className = "rsection-title";
+        h.textContent = section.title;
+        wrap.appendChild(h);
+      }
+      if (section.kind === "group") {
+        const status = document.createElement("div");
+        status.className = "rgroup-status";
+        wrap.appendChild(status);
+        if (section.switch.length) wrap.appendChild(remoteGrid(section.switch, section.switch.length));
+        if (section.items.length) wrap.appendChild(remoteGrid(section.items, section.columns, "rgrid-inputs"));
+      } else if (section.kind === "palette") {
+        wrap.appendChild(remoteGrid(section.items, 4, "rgrid-palette"));
+      } else {
+        wrap.appendChild(remoteGrid(section.items, section.columns, `rgrid-${section.kind}`));
+      }
+      body.appendChild(wrap);
+    }
+    renderRemoteState();
+  }
+
+  function renderRemoteState() {
+    const remote = state.remote;
+    if (!remote || !remote.layout) return;
+    const st = state.deviceState[remote.deviceId] || { power: null, groups: {} };
+    const model = remote.layout.state || { power: false, groups: {} };
+    const bar = $("#remote-status");
+    const chips = [];
+    if (model.power) chips.push({ label: "Gerät", value: st.power, group: null });
+    bar.classList.toggle("hidden", !chips.length);
+    bar.replaceChildren(...chips.map((c) => statusToggle(c.label, c.value, c.group)));
+    $$("#remote-body .rsection-group").forEach((section) => {
+      const group = section.dataset.group;
+      const gm = model.groups[group];
+      const gs = (st.groups || {})[group] || {};
+      const box = $(".rgroup-status", section);
+      box.replaceChildren();
+      if (gm && gm.power) box.appendChild(statusToggle("Ausgang", gs.power, group));
+      if (gm && gm.select) {
+        const active = document.createElement("span");
+        active.className = "state-chip state-chip-lg";
+        active.dataset.on = "true";
+        active.textContent = gs.value ? `Aktiv: ${gs.value}` : "Aktiv: unbekannt";
+        box.appendChild(active);
+      }
+      $$(".rgrid-inputs .rbtn", section).forEach((b) => b.classList.toggle("is-active", Boolean(gs.value) && $(".rbtn-label", b).textContent === gs.value));
+    });
+  }
+
+  function statusToggle(label, value, group) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "state-chip state-chip-lg state-toggle";
+    b.dataset.on = String(value === true);
+    b.textContent = `${label}: ${value === true ? "An" : value === false ? "Aus" : "unbekannt"}`;
+    b.title = "Antippen, um den Status zu korrigieren (sendet nichts)";
+    b.addEventListener("click", async () => {
+      try {
+        await api(`api/state/${encodeURIComponent(state.remote.deviceId)}`, { method: "PUT", body: { group, power: value !== true } });
+        await refreshDeviceState();
+      } catch (err) { toast(err.message, "error"); }
+    });
+    return b;
+  }
+
+  async function remoteSend(button) {
+    const remote = state.remote;
+    button.classList.add("is-pressed");
+    if (navigator.vibrate) navigator.vibrate(15);
+    try {
+      await api("api/send", { method: "POST", body: { device_id: remote.deviceId, command_id: button.dataset.commandId } });
+      scheduleStateRefresh(150);
+    } catch (err) {
+      toast(err.message, "error");
+      if (err.status === 503) refreshStatus();
+    } finally {
+      setTimeout(() => button.classList.remove("is-pressed"), 180);
+    }
+  }
+
+  // ------------------------------------------------------------------ edit device / button
+
+  function buildPicker(container, selected) {
+    container.replaceChildren();
+    Object.entries(ICONS).forEach(([key, icon]) => {
+      const label = document.createElement("label");
+      label.className = "icon-option";
+      label.innerHTML = `<input type="radio" name="edit-icon" value="${key}" class="sr-only" ${key === selected ? "checked" : ""}>${iconSvg(key, "h-5 w-5")}<span>${icon.label}</span>`;
+      container.appendChild(label);
+    });
+  }
+
+  function openEditDevice(deviceId) {
+    const device = deviceById(deviceId);
+    if (!device) return;
+    state.editDeviceId = deviceId;
+    $("#edit-device-name").value = device.name;
+    buildPicker($("#edit-icon-picker"), device.icon || "remote");
+    openModal("#modal-edit-device");
+  }
+
+  async function saveEditDevice(event) {
+    event.preventDefault();
+    const id = state.editDeviceId;
+    const icon = ($("#edit-icon-picker input:checked") || {}).value;
+    try {
+      await api(`api/devices/${encodeURIComponent(id)}`, { method: "PUT", body: { name: $("#edit-device-name").value.trim(), icon } });
+      closeModal("#modal-edit-device");
+      toast("Gerät gespeichert", "success");
+      await loadDevices();
+    } catch (err) { toast(err.message, "error"); }
+  }
+
+  function deleteDevice(deviceId) {
+    const device = deviceById(deviceId);
+    if (!device) return;
+    confirmDelete("Gerät löschen?", `„${device.name}“ und alle ${(device.commands || []).length} Tasten werden gelöscht – auch in Home Assistant.`, async () => {
+      try {
+        await api(`api/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+        toast(`„${device.name}“ gelöscht`);
+        await loadDevices();
+      } catch (err) { toast(err.message, "error"); }
+    });
+  }
+
+  function openEditCommand(deviceId, commandId) {
+    const device = deviceById(deviceId);
+    const command = device && (device.commands || []).find((c) => c.id === commandId);
+    if (!command) return;
+    state.editCommand = { deviceId, commandId };
+    $("#edit-command-title").textContent = `Taste bearbeiten · ${device.name}`;
+    $("#edit-command-name").value = command.name;
+    const select = $("#edit-command-color");
+    select.replaceChildren(new Option("– keine Farbe –", ""));
+    for (const [key, c] of Object.entries(state.palette)) select.appendChild(new Option(c.label, key, false, key === command.display_color));
+    openModal("#modal-edit-command");
+  }
+
+  async function saveEditCommand(event) {
+    event.preventDefault();
+    const { deviceId, commandId } = state.editCommand;
+    try {
+      await api(`api/devices/${encodeURIComponent(deviceId)}/commands/${encodeURIComponent(commandId)}`, {
+        method: "PUT",
+        body: { name: $("#edit-command-name").value.trim(), color: $("#edit-command-color").value },
+      });
+      closeModal("#modal-edit-command");
+      toast("Taste gespeichert", "success");
+      await loadDevices();
+    } catch (err) { toast(err.message, "error"); }
+  }
+
+  function deleteCommand(deviceId, commandId) {
+    const device = deviceById(deviceId);
+    const command = device && (device.commands || []).find((c) => c.id === commandId);
+    if (!command) return;
+    confirmDelete("Taste löschen?", `„${command.name}“ von „${device.name}“ wird gelöscht.`, async () => {
+      try {
+        await api(`api/devices/${encodeURIComponent(deviceId)}/commands/${encodeURIComponent(commandId)}`, { method: "DELETE" });
+        toast(`„${command.name}“ gelöscht`);
+        await loadDevices();
+      } catch (err) { toast(err.message, "error"); }
+    });
+  }
+
+  function bindEditEvents() {
+    $("#form-edit-device").addEventListener("submit", saveEditDevice);
+    $$("[data-edit-action]").forEach((b) => b.addEventListener("click", () => {
+      const id = state.editDeviceId;
+      closeModal("#modal-edit-device");
+      if (b.dataset.editAction === "smartir") openSmartir(id);
+      if (b.dataset.editAction === "colors") openColorCheck(id);
+      if (b.dataset.editAction === "delete") setTimeout(() => deleteDevice(id), 160);
+    }));
+    $("#form-edit-command").addEventListener("submit", saveEditCommand);
+    $$("[data-cmd-action]").forEach((b) => b.addEventListener("click", async () => {
+      const { deviceId, commandId } = state.editCommand;
+      const device = deviceById(deviceId);
+      const command = device && device.commands.find((c) => c.id === commandId);
+      if (b.dataset.cmdAction === "send") {
+        await sendCommandQuiet(deviceId, commandId);
+        scheduleStateRefresh();
+        return;
+      }
+      closeModal("#modal-edit-command");
+      if (b.dataset.cmdAction === "relearn" && command) setTimeout(() => openLearnModal(deviceId, { name: command.name, label: `neu: ${command.name}` }), 160);
+      if (b.dataset.cmdAction === "delete") setTimeout(() => deleteCommand(deviceId, commandId), 160);
+    }));
+    $("#remote-body").addEventListener("click", (e) => {
+      const button = e.target.closest(".rbtn");
+      if (button) remoteSend(button);
+    });
+    $("#remote-learn").addEventListener("click", () => {
+      const id = state.remote && state.remote.deviceId;
+      closeModal("#modal-remote");
+      if (id) setTimeout(() => openLearnModal(id), 160);
+    });
+  }
+
+  // ------------------------------------------------------------------ scenes
+
+  async function loadScenes() {
+    try {
+      const data = await api("api/scenes");
+      state.scenes = data.scenes || [];
+      state.sceneRunning = data.running || {};
+      renderScenes();
+    } catch (err) { toast(err.message, "error"); }
+  }
+
+  function stepLabel(step) {
+    const device = deviceById(step.device_id);
+    const command = device && (device.commands || []).find((c) => c.id === step.command_id);
+    if (!command) return "(fehlende Taste)";
+    return `${device.name}: ${command.name}${step.repeat > 1 ? ` ×${step.repeat}` : ""}`;
+  }
+
+  function renderScenes() {
+    const list = $("#scene-list");
+    list.replaceChildren();
+    $("#scenes-empty").classList.toggle("hidden", state.scenes.length > 0);
+    for (const scene of state.scenes) {
+      const card = document.createElement("article");
+      card.className = "scene-card";
+      card.dataset.sceneId = scene.id;
+      const running = state.sceneRunning && state.sceneRunning.id === scene.id;
+      card.innerHTML = `
+        <div class="flex items-start gap-3">
+          <span class="scene-icon">${mdiSvg("mdi:play")}</span>
+          <div class="min-w-0 flex-1"><h3 class="truncate font-semibold"></h3><p class="scene-steps-summary text-xs text-ha-muted"></p></div>
+          <button type="button" class="icon-btn" data-scene-action="edit" title="Bearbeiten" aria-label="Bearbeiten"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+          <button type="button" class="icon-btn" data-scene-action="delete" title="Löschen" aria-label="Löschen"><svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+        </div>
+        <ol class="scene-preview"></ol>
+        <button type="button" class="btn btn-primary mt-3 w-full" data-scene-action="run"></button>`;
+      $("h3", card).textContent = scene.name;
+      $(".scene-steps-summary", card).textContent = `${scene.steps.length} Schritte`;
+      const preview = $(".scene-preview", card);
+      scene.steps.slice(0, 4).forEach((step) => {
+        const li = document.createElement("li");
+        li.textContent = stepLabel(step);
+        preview.appendChild(li);
+      });
+      if (scene.steps.length > 4) {
+        const li = document.createElement("li");
+        li.textContent = `… und ${scene.steps.length - 4} weitere`;
+        preview.appendChild(li);
+      }
+      const run = $("[data-scene-action=run]", card);
+      run.textContent = running ? `Läuft … (Schritt ${state.sceneRunning.step})` : "▶ Ausführen";
+      run.disabled = running;
+      list.appendChild(card);
+    }
+  }
+
+  async function runScene(sceneId) {
+    try {
+      await api(`api/scenes/${encodeURIComponent(sceneId)}/run`, { method: "POST" });
+      toast("Szene gestartet", "success");
+      pollScene();
+    } catch (err) { toast(err.message, "error"); }
+  }
+
+  async function pollScene() {
+    await loadScenes();
+    if (state.sceneRunning && state.sceneRunning.id) {
+      setTimeout(pollScene, 700);
+    } else {
+      if (state.sceneRunning && state.sceneRunning.error) toast(`Szene abgebrochen: ${state.sceneRunning.error}`, "error");
+      scheduleStateRefresh(100);
+    }
+  }
+
+  function openSceneEditor(sceneId) {
+    const scene = state.scenes.find((s) => s.id === sceneId);
+    state.sceneEdit = { id: scene ? scene.id : null, steps: scene ? scene.steps.map((s) => ({ ...s })) : [] };
+    $("#scene-title").textContent = scene ? "Szene bearbeiten" : "Neue Szene";
+    $("#scene-name").value = scene ? scene.name : "";
+    if (!state.sceneEdit.steps.length) addSceneStep();
+    renderSceneSteps();
+    openModal("#modal-scene");
+  }
+
+  function addSceneStep() {
+    const withButtons = state.devices.filter((d) => (d.commands || []).length);
+    const last = state.sceneEdit.steps[state.sceneEdit.steps.length - 1];
+    const device = (last && deviceById(last.device_id)) || withButtons[0];
+    if (!device) {
+      toast("Lege zuerst ein Gerät mit Tasten an.", "error");
+      return;
+    }
+    state.sceneEdit.steps.push({ device_id: device.id, command_id: device.commands[0].id, repeat: 1, delay: 0.5 });
+  }
+
+  function renderSceneSteps() {
+    const list = $("#scene-steps");
+    list.replaceChildren();
+    const withButtons = state.devices.filter((d) => (d.commands || []).length);
+    state.sceneEdit.steps.forEach((step, index) => {
+      const li = document.createElement("li");
+      li.className = "scene-step";
+      li.innerHTML = `
+        <span class="scene-step-no">${index + 1}</span>
+        <select class="input select" data-field="device" aria-label="Gerät"></select>
+        <select class="input select" data-field="command" aria-label="Taste"></select>
+        <label class="scene-num" title="Wie oft senden">×<input type="number" min="1" max="20" class="input" data-field="repeat"></label>
+        <label class="scene-num" title="Pause danach (Sekunden)">⏱<input type="number" min="0" max="120" step="0.5" class="input" data-field="delay"></label>
+        <span class="scene-step-actions">
+          <button type="button" class="icon-btn icon-btn-sm" data-step="up" title="Nach oben" aria-label="Nach oben">↑</button>
+          <button type="button" class="icon-btn icon-btn-sm" data-step="down" title="Nach unten" aria-label="Nach unten">↓</button>
+          <button type="button" class="icon-btn icon-btn-sm" data-step="remove" title="Entfernen" aria-label="Entfernen">✕</button>
+        </span>`;
+      const devSel = $("[data-field=device]", li);
+      withButtons.forEach((d) => devSel.appendChild(new Option(d.name, d.id, false, d.id === step.device_id)));
+      const cmdSel = $("[data-field=command]", li);
+      const device = deviceById(step.device_id);
+      ((device && device.commands) || []).forEach((c) => cmdSel.appendChild(new Option(c.name, c.id, false, c.id === step.command_id)));
+      $("[data-field=repeat]", li).value = step.repeat;
+      $("[data-field=delay]", li).value = step.delay;
+      devSel.addEventListener("change", () => {
+        const d = deviceById(devSel.value);
+        step.device_id = d.id;
+        step.command_id = d.commands[0].id;
+        renderSceneSteps();
+      });
+      cmdSel.addEventListener("change", () => { step.command_id = cmdSel.value; });
+      $("[data-field=repeat]", li).addEventListener("change", (e) => { step.repeat = Math.min(20, Math.max(1, Number(e.target.value) || 1)); });
+      $("[data-field=delay]", li).addEventListener("change", (e) => { step.delay = Math.min(120, Math.max(0, Number(e.target.value) || 0)); });
+      $$("[data-step]", li).forEach((b) => b.addEventListener("click", () => {
+        const steps = state.sceneEdit.steps;
+        if (b.dataset.step === "remove") steps.splice(index, 1);
+        if (b.dataset.step === "up" && index > 0) [steps[index - 1], steps[index]] = [steps[index], steps[index - 1]];
+        if (b.dataset.step === "down" && index < steps.length - 1) [steps[index + 1], steps[index]] = [steps[index], steps[index + 1]];
+        renderSceneSteps();
+      }));
+      list.appendChild(li);
+    });
+  }
+
+  async function saveScene(runAfter) {
+    const edit = state.sceneEdit;
+    const name = $("#scene-name").value.trim();
+    if (!name) {
+      $("#scene-name").focus();
+      return;
+    }
+    const body = { name, icon: "movie", steps: edit.steps };
+    try {
+      const scene = edit.id
+        ? await api(`api/scenes/${encodeURIComponent(edit.id)}`, { method: "PUT", body })
+        : await api("api/scenes", { method: "POST", body });
+      closeModal("#modal-scene");
+      toast(`Szene „${scene.name}“ gespeichert`, "success");
+      await loadScenes();
+      if (runAfter) runScene(scene.id);
+    } catch (err) { toast(err.message, "error"); }
+  }
+
+  function bindSceneEvents() {
+    $("#btn-new-scene").addEventListener("click", () => openSceneEditor(null));
+    $$("[data-action=new-scene]").forEach((b) => b.addEventListener("click", () => openSceneEditor(null)));
+    $("#scene-add-step").addEventListener("click", () => { addSceneStep(); renderSceneSteps(); });
+    $("#form-scene").addEventListener("submit", (e) => { e.preventDefault(); saveScene(false); });
+    $("#scene-test").addEventListener("click", () => saveScene(true));
+    $("#scene-list").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-scene-action]");
+      if (!b) return;
+      const id = b.closest("[data-scene-id]").dataset.sceneId;
+      const scene = state.scenes.find((s) => s.id === id);
+      if (b.dataset.sceneAction === "run") runScene(id);
+      if (b.dataset.sceneAction === "edit") openSceneEditor(id);
+      if (b.dataset.sceneAction === "delete") {
+        confirmDelete("Szene löschen?", `„${scene.name}“ wird gelöscht – auch in Home Assistant.`, async () => {
+          try {
+            await api(`api/scenes/${encodeURIComponent(id)}`, { method: "DELETE" });
+            await loadScenes();
+          } catch (err) { toast(err.message, "error"); }
+        });
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------ settings
+
+  function renderSettings() {
+    const rm = state.rm || {};
+    const dl = $("#settings-device");
+    const rows = [
+      ["Status", rm.connected ? "Verbunden" : (rm.error || "Nicht verbunden")],
+      ["Modell", rm.model || "–"],
+      ["IP-Adresse", rm.ip || "–"],
+      ["MAC-Adresse", rm.mac || "–"],
+    ];
+    dl.replaceChildren(...rows.flatMap(([k, v]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      return [dt, dd];
+    }));
+    const ha = state.ha;
+    let summary = "Kein Zugriff auf Home Assistant.";
+    if (ha && ha.available) {
+      summary = ha.error ? `Problem: ${ha.error}` : `${ha.scripts} Skripte, ${ha.helpers || 0} Status-Helfer, Fernbedienung über ${ha.remote_entity || "–"}${ha.remote_ok ? "" : " (Broadlink-Integration nicht gefunden)"}.`;
+    }
+    $("#settings-ha-summary").textContent = summary;
+  }
+
+  async function restoreBackup(file) {
+    let payload;
+    try {
+      payload = JSON.parse(await file.text());
+    } catch (_) {
+      toast("Die Datei ist keine gültige Sicherung.", "error");
+      return;
+    }
+    const count = (payload.devices || []).length;
+    $("#confirm-ok").textContent = "Wiederherstellen";
+    confirmDelete("Sicherung wiederherstellen?", `Alle aktuellen Geräte und Szenen werden durch die Sicherung ersetzt (${count} Geräte, ${(payload.scenes || []).length} Szenen).`, async () => {
+      $("#confirm-ok").textContent = "Löschen";
+      try {
+        const result = await api("api/restore", { method: "POST", body: { devices: payload.devices || [], scenes: payload.scenes || [], settings: payload.settings } });
+        toast(`${result.devices} Geräte und ${result.scenes} Szenen wiederhergestellt`, "success");
+        await loadDevices();
+      } catch (err) { toast(err.message, "error"); }
+    });
+  }
+
+  function bindAppEvents() {
+    $$(".nav-tab").forEach((t) => t.addEventListener("click", () => showView(t.dataset.view)));
+    $("#settings-ha-open").addEventListener("click", () => $("#btn-ha").click());
+    $("#settings-device-check").addEventListener("click", async () => { await refreshStatus(); renderSettings(); });
+    $("#settings-restore").addEventListener("click", () => $("#restore-file").click());
+    $("#restore-file").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      e.target.value = "";
+      if (file) restoreBackup(file);
+    });
+    bindEditEvents();
+    bindSceneEvents();
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshDeviceState(); });
+    setInterval(() => { if (!document.hidden) refreshDeviceState(); }, 15000);
+  }
+
   // ------------------------------------------------------------------ events
 
   function bindEvents() {
@@ -1494,26 +2122,15 @@
         case "send":
           sendCommand(button, deviceId, commandId);
           break;
-        case "delete-device":
-          confirmDelete("Gerät löschen?", `„${device.name}“ und alle ${(device.commands || []).length} Tasten werden gelöscht.`, async () => {
-            try {
-              await api(`api/devices/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
-              toast(`„${device.name}“ gelöscht`);
-              await loadDevices();
-            } catch (err) { toast(err.message, "error"); }
-          });
+        case "remote":
+          openRemote(deviceId);
           break;
-        case "delete-command": {
-          const command = (device.commands || []).find((c) => c.id === commandId);
-          confirmDelete("Taste löschen?", `„${command.name}“ von „${device.name}“ wird gelöscht.`, async () => {
-            try {
-              await api(`api/devices/${encodeURIComponent(deviceId)}/commands/${encodeURIComponent(commandId)}`, { method: "DELETE" });
-              toast(`„${command.name}“ gelöscht`);
-              await loadDevices();
-            } catch (err) { toast(err.message, "error"); }
-          });
+        case "edit-device":
+          openEditDevice(deviceId);
           break;
-        }
+        case "edit-command":
+          openEditCommand(deviceId, commandId);
+          break;
         default:
           break;
       }
@@ -1522,9 +2139,14 @@
 
   document.addEventListener("DOMContentLoaded", async () => {
     bindEvents();
+    bindAppEvents();
+    let view = "devices";
+    try { view = localStorage.getItem("blm.view") || "devices"; } catch (_) { /* storage blocked */ }
+    showView(view);
     await loadPalette();
-    loadDevices();
+    await loadDevices();
     refreshStatus();
     refreshHa();
+    refreshDeviceState();
   });
 })();

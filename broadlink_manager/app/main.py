@@ -31,13 +31,14 @@ from pydantic import BaseModel, Field
 import colors
 import ha_sync
 import irdb
+import layout
 import smartir
 
 # --------------------------------------------------------------------------
 # Configuration
 # --------------------------------------------------------------------------
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "2.0.0"
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 DEVICES_FILE = DATA_DIR / "devices.json"
@@ -747,7 +748,10 @@ def api_send(body: SendRequest) -> Dict[str, Any]:
 
     client.send(packets)
     log.info("Gesendet: %s", label)
-    return {"ok": True, "sent": label}
+    state = None
+    if not body.code:
+        state = _apply_effects(device, layout.command_effects(device, command))
+    return {"ok": True, "sent": label, "state": state}
 
 
 # --------------------------------------------------------------------------
@@ -1230,3 +1234,293 @@ def _resync_loop() -> None:
 @app.on_event("startup")
 def _start_background() -> None:
     threading.Thread(target=_resync_loop, name="smartir-resync", daemon=True).start()
+
+
+# --------------------------------------------------------------------------
+# Remembered device state (power, active input per output)
+# --------------------------------------------------------------------------
+
+STATE_FILE = DATA_DIR / "state.json"
+_state_lock = threading.Lock()
+
+
+def _read_state() -> Dict[str, Any]:
+    try:
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(state: Dict[str, Any]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
+
+
+def _device_state(state: Dict[str, Any], device_id: str) -> Dict[str, Any]:
+    return state.setdefault(device_id, {"power": None, "groups": {}})
+
+
+def _apply_effects(device: Dict[str, Any], effects: List[Dict[str, Any]], push: bool = True) -> Dict[str, Any]:
+    with _state_lock:
+        state = _read_state()
+        entry = _device_state(state, device["id"])
+        for effect in effects:
+            target = entry if effect["group"] is None else entry["groups"].setdefault(effect["group"], {"value": None, "power": None})
+            if effect["kind"] == "power":
+                target["power"] = (not target.get("power")) if effect["value"] == "toggle" else bool(effect["value"])
+            elif effect["kind"] == "select":
+                target["value"] = effect["value"]
+        if effects:
+            _write_state(state)
+    if effects and push:
+        threading.Thread(target=_ha.push_effects, args=(device["id"], effects), daemon=True).start()
+    return entry
+
+
+class StateUpdate(BaseModel):
+    group: Optional[str] = Field(None, max_length=60)
+    power: Optional[bool] = None
+    value: Optional[str] = Field(None, max_length=60)
+
+
+@app.get("/api/state")
+def api_state() -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+    with _state_lock:
+        state = _read_state()
+    remote = _ha.read_states(data["devices"])  # values from HA helpers win (also changed by HA scripts)
+    result: Dict[str, Any] = {}
+    for device in data["devices"]:
+        model = layout.state_model(device)
+        if not model["power"] and not model["groups"]:
+            continue
+        local = state.get(device["id"], {"power": None, "groups": {}})
+        merged = {"power": local.get("power") if model["power"] else None, "groups": {}, "model": model}
+        for name, group in model["groups"].items():
+            g = local.get("groups", {}).get(name, {})
+            merged["groups"][name] = {"value": g.get("value") if group["select"] else None,
+                                      "power": g.get("power") if group["power"] else None}
+        for key, value in remote.get(device["id"], {}).items():
+            if key == "power" and model["power"]:
+                merged["power"] = value
+            elif key.startswith("value:") and key[6:] in merged["groups"]:
+                merged["groups"][key[6:]]["value"] = value
+            elif key.startswith("power:") and key[6:] in merged["groups"]:
+                merged["groups"][key[6:]]["power"] = value
+        result[device["id"]] = merged
+    return {"devices": result}
+
+
+@app.put("/api/state/{device_id}")
+def api_put_state(device_id: str, body: StateUpdate) -> Dict[str, Any]:
+    """Correct the remembered state without sending anything (e.g. TV was switched by hand)."""
+    with _store_lock:
+        device = find_device(load_store(), device_id)
+    effects = []
+    if body.power is not None:
+        effects.append({"kind": "power", "group": body.group, "value": body.power})
+    if body.value is not None and body.group:
+        effects.append({"kind": "select", "group": body.group, "value": body.value})
+    return _apply_effects(device, effects)
+
+
+# --------------------------------------------------------------------------
+# Devices: edit, layout
+# --------------------------------------------------------------------------
+
+
+class DeviceUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=60)
+    icon: Optional[str] = Field(None, max_length=30)
+
+
+@app.put("/api/devices/{device_id}")
+def api_update_device(device_id: str, body: DeviceUpdate) -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+        device = find_device(data, device_id)
+        if body.name is not None and body.name.strip():
+            device["name"] = body.name.strip()
+        if body.icon is not None:
+            device["icon"] = body.icon
+        device["updated"] = _now()
+        _sync_smartir(device, data)
+        save_store(data)
+    return device
+
+
+@app.get("/api/devices/{device_id}/layout")
+def api_device_layout(device_id: str) -> Dict[str, Any]:
+    with _store_lock:
+        device = find_device(load_store(), device_id)
+    return layout.device_layout(device)
+
+
+# --------------------------------------------------------------------------
+# Scenes (macros across devices)
+# --------------------------------------------------------------------------
+
+
+class SceneStep(BaseModel):
+    device_id: str
+    command_id: str
+    repeat: int = Field(1, ge=1, le=20)
+    delay: float = Field(0.5, ge=0, le=120)  # seconds after this step
+
+
+class SceneBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=60)
+    icon: str = Field("movie", max_length=30)
+    steps: List[SceneStep] = []
+
+
+_scene_running: Dict[str, Any] = {"id": None, "step": 0, "error": None}
+
+
+def _validate_steps(data: Dict[str, Any], steps: List[SceneStep]) -> List[Dict[str, Any]]:
+    result = []
+    for step in steps:
+        device = find_device(data, step.device_id)
+        find_command(device, step.command_id)
+        result.append({"device_id": step.device_id, "command_id": step.command_id,
+                       "repeat": step.repeat, "delay": round(step.delay, 2)})
+    return result
+
+
+@app.get("/api/scenes")
+def api_scenes() -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+    return {"scenes": data.get("scenes", []), "running": _scene_running}
+
+
+@app.post("/api/scenes")
+def api_create_scene(body: SceneBody) -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+        scenes = data.setdefault("scenes", [])
+        scene = {
+            "id": _unique_id(_slugify(body.name), [s["id"] for s in scenes]),
+            "name": body.name.strip(),
+            "icon": body.icon,
+            "steps": _validate_steps(data, body.steps),
+            "created": _now(),
+        }
+        scenes.append(scene)
+        save_store(data)
+    return scene
+
+
+@app.put("/api/scenes/{scene_id}")
+def api_update_scene(scene_id: str, body: SceneBody) -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+        scene = next((s for s in data.get("scenes", []) if s["id"] == scene_id), None)
+        if not scene:
+            raise HTTPException(status_code=404, detail="Szene nicht gefunden.")
+        scene.update(name=body.name.strip(), icon=body.icon, steps=_validate_steps(data, body.steps), updated=_now())
+        save_store(data)
+    return scene
+
+
+@app.delete("/api/scenes/{scene_id}")
+def api_delete_scene(scene_id: str) -> Dict[str, Any]:
+    with _store_lock:
+        data = load_store()
+        before = len(data.get("scenes", []))
+        data["scenes"] = [s for s in data.get("scenes", []) if s["id"] != scene_id]
+        if len(data["scenes"]) == before:
+            raise HTTPException(status_code=404, detail="Szene nicht gefunden.")
+        save_store(data)
+    return {"ok": True}
+
+
+def _run_scene(scene: Dict[str, Any], devices: Dict[str, Dict[str, Any]]) -> None:
+    _scene_running.update(id=scene["id"], step=0, error=None)
+    try:
+        for index, step in enumerate(scene["steps"]):
+            _scene_running["step"] = index + 1
+            device = devices.get(step["device_id"])
+            command = next((c for c in (device or {}).get("commands", []) if c["id"] == step["command_id"]), None)
+            if not command:
+                log.warning("Szene %s: Schritt %d übersprungen (Taste fehlt).", scene["name"], index + 1)
+                continue
+            for n in range(step.get("repeat", 1)):
+                client.send(_packets(command["code"]))
+                _apply_effects(device, layout.command_effects(device, command))
+                if n < step.get("repeat", 1) - 1:
+                    time.sleep(0.35)
+            time.sleep(step.get("delay", 0.5))
+        log.info("Szene „%s“ ausgeführt.", scene["name"])
+    except (DeviceUnavailable, HTTPException) as err:
+        _scene_running["error"] = str(getattr(err, "detail", err))
+        log.warning("Szene „%s“ abgebrochen: %s", scene["name"], _scene_running["error"])
+    finally:
+        _scene_running["id"] = None
+
+
+@app.post("/api/scenes/{scene_id}/run")
+def api_run_scene(scene_id: str) -> Dict[str, Any]:
+    if _scene_running["id"]:
+        raise HTTPException(status_code=409, detail="Es läuft bereits eine Szene.")
+    with _store_lock:
+        data = load_store()
+    scene = next((s for s in data.get("scenes", []) if s["id"] == scene_id), None)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Szene nicht gefunden.")
+    if not scene["steps"]:
+        raise HTTPException(status_code=400, detail="Die Szene hat noch keine Schritte.")
+    devices = {d["id"]: d for d in data["devices"]}
+    threading.Thread(target=_run_scene, args=(scene, devices), name="scene", daemon=True).start()
+    return {"started": True}
+
+
+# --------------------------------------------------------------------------
+# Backup / restore
+# --------------------------------------------------------------------------
+
+
+@app.get("/api/backup")
+def api_backup() -> JSONResponse:
+    with _store_lock:
+        data = load_store()
+    payload = {"app": "broadlink_manager", "version": APP_VERSION, "exported": _now(),
+               "devices": data["devices"], "scenes": data.get("scenes", []), "settings": data["settings"]}
+    filename = f"broadlink-ir-manager-{datetime.now():%Y%m%d-%H%M}.json"
+    return JSONResponse(payload, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+class RestoreBody(BaseModel):
+    devices: List[Dict[str, Any]]
+    scenes: List[Dict[str, Any]] = []
+    settings: Optional[Dict[str, Any]] = None
+
+
+@app.post("/api/restore")
+def api_restore(body: RestoreBody) -> Dict[str, Any]:
+    ids = set()
+    for device in body.devices:
+        if not isinstance(device.get("id"), str) or not isinstance(device.get("name"), str):
+            raise HTTPException(status_code=400, detail="Ungültige Sicherung: Gerät ohne id/name.")
+        if device["id"] in ids:
+            raise HTTPException(status_code=400, detail=f"Ungültige Sicherung: doppelte Geräte-ID {device['id']}.")
+        ids.add(device["id"])
+        for command in device.get("commands", []):
+            if not isinstance(command.get("id"), str) or not isinstance(command.get("name"), str):
+                raise HTTPException(status_code=400, detail="Ungültige Sicherung: Taste ohne id/name.")
+            try:
+                _packets(command.get("code"))
+            except (HTTPException, TypeError) as err:
+                raise HTTPException(status_code=400, detail=f"Ungültiger Code bei „{command['name']}“.") from err
+    with _store_lock:
+        data = load_store()
+        data["devices"] = body.devices
+        data["scenes"] = [s for s in body.scenes if isinstance(s, dict) and s.get("id")]
+        if body.settings:
+            data["settings"].update({k: v for k, v in body.settings.items() if k in DEFAULT_SETTINGS})
+        save_store(data)
+    log.info("Sicherung wiederhergestellt: %d Geräte, %d Szenen.", len(body.devices), len(data["scenes"]))
+    return {"devices": len(body.devices), "scenes": len(data["scenes"])}

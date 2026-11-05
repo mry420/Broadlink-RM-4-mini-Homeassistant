@@ -16,6 +16,25 @@ mit einem **Broadlink RM4 mini** – direkt in der HA-Seitenleiste.
 - **SmartIR-Datenbank:** fertige Codes vieler Marken suchen, testen und übernehmen
 - Läuft komplett lokal (kein Cloud-Dienst, kein CDN)
 
+
+### Neu in 2.0
+
+| Bereich | Was du damit machst |
+|---|---|
+| **Geräte** | Gerätekarten mit Status („An“, „Out A: PlayStation“). Tipp auf ein Gerät öffnet die **Fernbedienung**. „⋯“ an einer Taste: umbenennen, Farbe, neu anlernen, löschen. Stift-Symbol: Gerät umbenennen, Symbol, SmartIR, Farben prüfen, löschen. |
+| **Szenen** | Mehrere Tasten mit einem Tipp, z. B. *Kino-Modus*: Beamer an → PlayStation auf Out A → Ton 5.1. Pro Schritt Wiederholungen und Pause einstellbar. Erscheinen auch in Home Assistant. |
+| **Einstellungen** | Home-Assistant-Status, RM4-mini-Infos, Sicherung herunterladen/wiederherstellen, YAML-Export. |
+
+**Statusanzeige:** IR-Geräte melden nichts zurück – die App merkt sich deshalb, was zuletzt
+gesendet wurde: ob ein Gerät bzw. Ausgang an ist und welcher Eingang aktiv ist. Das gilt für
+Tasten aus der App, aus Szenen und aus Home Assistant. In Home Assistant entstehen dafür
+Helfer (`input_boolean.ir_…_an`, `input_select.ir_…`), die du auch in Automationen nutzen kannst.
+Wurde ein Gerät mit der Original-Fernbedienung bedient, tippe in der App auf den Status, um ihn
+zu korrigieren.
+
+Eingänge werden erkannt, wenn sie in einer Gruppe stehen, deren Name nach Ausgang/Eingang klingt
+(„Out A: …“, „Ausgang 1: …“, „Eingang: …“), oder wenn sie wie Eingänge heißen („HDMI 1“, „AV“ …).
+
 ## Installation
 
 1. **Einstellungen → Apps → App-Store** öffnen.

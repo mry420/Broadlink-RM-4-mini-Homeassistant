@@ -1,8 +1,12 @@
 """Keep Home Assistant in sync with the learned devices.
 
-For every button a script `script.ir_<device>_<button>` is created through the
-HA config API (same as the script editor does). Additionally a dashboard
-"Fernbedienungen" is maintained with one remote-control view per device.
+Created through the HA APIs (no YAML, no restart):
+- one script per button `script.ir_<device>_<button>` (sends the code and
+  updates the remembered state),
+- one script per scene `script.ir_szene_<scene>`,
+- helpers for the remembered state: `input_boolean` (device/output on) and
+  `input_select` (active input of an output),
+- the dashboard "Fernbedienungen" with a scene view and one remote per device.
 
 Inside the app container the Supervisor proxy is used (homeassistant_api: true).
 For local development HA_URL + HA_TOKEN can point to any HA instance.
@@ -26,91 +30,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import websocket  # websocket-client
 
 import colors
-from smartir import _NAME_HINTS, _SOURCE_PREFIXES, _TOGGLE_HINTS, _norm
+import layout
 
 log = logging.getLogger("broadlink_manager.ha")
 
 DASHBOARD_URL = "ir-fernbedienungen"
 DASHBOARD_TITLE = "Fernbedienungen"
 SCRIPT_PREFIX = "ir_"
+SCENE_PREFIX = "ir_szene_"
 DEBOUNCE = 1.5
 
-# --------------------------------------------------------------------------
-# Button roles (layout + icons)
-# --------------------------------------------------------------------------
-
-_EXTRA_HINTS: Dict[str, List[str]] = {
-    "up": ["hoch", "up", "oben", "pfeil hoch", "arrow up", "cursor up"],
-    "down": ["runter", "down", "unten", "pfeil runter", "arrow down", "cursor down"],
-    "left": ["links", "left", "pfeil links", "arrow left", "cursor left"],
-    "right": ["rechts", "right", "pfeil rechts", "arrow right", "cursor right"],
-    "ok": ["ok", "enter", "select", "auswahl", "bestaetigen", "bestätigen"],
-    "menu": ["menue", "menü", "menu", "main menu", "hauptmenü"],
-    "settings": ["setup", "settings", "einstellungen", "options", "optionen", "tools"],
-    "back": ["zurueck", "zurück", "back", "return"],
-    "home": ["home", "start"],
-    "exit": ["exit", "beenden", "verlassen"],
-    "info": ["info", "guide", "epg", "display"],
-    "play": ["play", "wiedergabe", "play/pause", "play pause"],
-    "pause": ["pause"],
-    "stop": ["stop"],
-    "rewind": ["rewind", "zurückspulen", "zurueckspulen", "rew", "<<"],
-    "forward": ["forward", "vorspulen", "ff", "fwd", ">>"],
-    "next": ["next", "skip", "nächster titel"],
-    "prev": ["prev", "previous", "vorheriger titel"],
-    "record": ["record", "rec", "aufnahme"],
-}
-
-_ICONS = {
-    "power": "mdi:power", "on": "mdi:power-on", "off": "mdi:power-off",
-    "volumeUp": "mdi:volume-plus", "volumeDown": "mdi:volume-minus", "mute": "mdi:volume-mute",
-    "nextChannel": "mdi:chevron-double-up", "previousChannel": "mdi:chevron-double-down",
-    "up": "mdi:chevron-up", "down": "mdi:chevron-down", "left": "mdi:chevron-left", "right": "mdi:chevron-right",
-    "ok": "mdi:checkbox-blank-circle", "menu": "mdi:menu", "settings": "mdi:cog", "back": "mdi:arrow-u-left-top", "home": "mdi:home",
-    "exit": "mdi:exit-to-app", "info": "mdi:information-outline", "source": "mdi:import",
-    "play": "mdi:play", "pause": "mdi:pause", "stop": "mdi:stop", "rewind": "mdi:rewind",
-    "forward": "mdi:fast-forward", "next": "mdi:skip-next", "prev": "mdi:skip-previous", "record": "mdi:record",
-    "brighten": "mdi:brightness-7", "dim": "mdi:brightness-5", "warmer": "mdi:thermometer-plus",
-    "colder": "mdi:snowflake", "night": "mdi:weather-night", "digit": "mdi:numeric",
-}
-_DEVICE_ICONS = {
-    "tv": "mdi:television", "soundbar": "mdi:soundbar", "ac": "mdi:air-conditioner", "fan": "mdi:fan",
-    "light": "mdi:lightbulb", "led": "mdi:led-strip-variant", "projector": "mdi:projector",
-    "receiver": "mdi:audio-video", "remote": "mdi:remote",
-}
-_DIGIT_ICONS = {str(i): f"mdi:numeric-{i}" for i in range(10)}
-
-
-def button_role(name: str) -> str:
-    norm = _norm(name)
-    if re.fullmatch(r"(?:taste |ziffer |zahl |nr\.? ?)?[0-9]", norm):
-        return "digit"
-    if norm in {_norm(h) for h in _TOGGLE_HINTS}:
-        return "power"
-    for role, hints in list(_NAME_HINTS.items()) + list(_EXTRA_HINTS.items()):
-        if norm in {_norm(h) for h in hints}:
-            return role
-    if norm.startswith(_SOURCE_PREFIXES):
-        return "source"
-    return "other"
-
-
-_NAME_ICONS = {
-    "a↔b": "mdi:swap-horizontal", "a<->b": "mdi:swap-horizontal", "a-b": "mdi:swap-horizontal",
-    "arc": "mdi:speaker", "earc": "mdi:speaker", "hdmi arc": "mdi:speaker",
-    "pass": "mdi:surround-sound", "passthrough": "mdi:surround-sound",
-    "2ch": "mdi:surround-sound-2-0", "5.1ch": "mdi:surround-sound-5-1", "7.1ch": "mdi:surround-sound-7-1",
-    "bluetooth": "mdi:bluetooth", "optisch": "mdi:toslink", "optical": "mdi:toslink",
-}
-
-
-def button_icon(name: str, role: str) -> str:
-    special = _NAME_ICONS.get(name.strip().lower())
-    if special:
-        return special
-    if role == "digit":
-        return _DIGIT_ICONS.get(re.sub(r"\D", "", name)[-1:], "mdi:numeric")
-    return _ICONS.get(role, "mdi:remote")
+# Kept for other modules that imported them from here
+button_role = layout.button_role
+button_icon = layout.button_icon
 
 
 def script_id(device_id: str, command_id: str) -> str:
@@ -118,33 +50,110 @@ def script_id(device_id: str, command_id: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", raw.lower())[:200]
 
 
+def scene_script_id(scene_id: str) -> str:
+    return re.sub(r"[^a-z0-9_]", "_", f"{SCENE_PREFIX}{scene_id}".lower())[:200]
+
+
+def view_path(device: Dict[str, Any]) -> str:
+    return re.sub(r"[^a-z0-9-]", "-", device["id"].lower())
+
+
 # --------------------------------------------------------------------------
-# Script + dashboard builders
+# Helpers for the remembered state
 # --------------------------------------------------------------------------
 
 
-def build_scripts(devices: List[Dict[str, Any]], remote_entity: str) -> Dict[str, Dict[str, Any]]:
+def desired_helpers(devices: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """key → {domain, name, icon, options?}. Keys: power|dev, gpower|dev|group, select|dev|group."""
+    helpers: Dict[str, Dict[str, Any]] = {}
+    for device in devices:
+        model = layout.state_model(device)
+        icon = layout.DEVICE_ICONS.get(device.get("icon", ""), "mdi:remote")
+        if model["power"]:
+            helpers[f"power|{device['id']}"] = {"domain": "input_boolean", "name": f"IR {device['name']} an", "icon": icon}
+        for group, entry in model["groups"].items():
+            if entry["power"]:
+                helpers[f"gpower|{device['id']}|{group}"] = {
+                    "domain": "input_boolean", "name": f"IR {device['name']} {group} an", "icon": "mdi:power"}
+            if entry["select"]:
+                helpers[f"select|{device['id']}|{group}"] = {
+                    "domain": "input_select", "name": f"IR {device['name']} {group}", "icon": "mdi:import",
+                    "options": entry["options"]}
+    return helpers
+
+
+def _effect_actions(device_id: str, effects: List[Dict[str, Any]], helper_entities: Dict[str, str]) -> List[Dict[str, Any]]:
+    actions = []
+    for effect in effects:
+        if effect["kind"] == "power":
+            key = f"power|{device_id}" if effect["group"] is None else f"gpower|{device_id}|{effect['group']}"
+            entity = helper_entities.get(key)
+            if entity:
+                service = {"toggle": "toggle", True: "turn_on", False: "turn_off"}[effect["value"]]
+                actions.append({"action": f"input_boolean.{service}", "target": {"entity_id": entity}})
+        elif effect["kind"] == "select":
+            entity = helper_entities.get(f"select|{device_id}|{effect['group']}")
+            if entity:
+                actions.append({"action": "input_select.select_option", "target": {"entity_id": entity},
+                                "data": {"option": effect["value"]}})
+    return actions
+
+
+# --------------------------------------------------------------------------
+# Scripts
+# --------------------------------------------------------------------------
+
+
+def build_scripts(devices: List[Dict[str, Any]], remote_entity: str, scenes: List[Dict[str, Any]],
+                  helper_entities: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
     scripts: Dict[str, Dict[str, Any]] = {}
+    known = {}
     for device in devices:
         for command in device.get("commands", []):
             code = command["code"]
             payload: Any = [f"b64:{c}" for c in code] if isinstance(code, list) else f"b64:{code}"
-            role = button_role(command["name"])
-            scripts[script_id(device["id"], command["id"])] = {
+            _, label = layout.split_group(command["name"])
+            role = layout.button_role(label)
+            sid = script_id(device["id"], command["id"])
+            known[(device["id"], command["id"])] = sid
+            scripts[sid] = {
                 "alias": f"{device['name']} – {command['name']}",
                 "description": "Automatisch erstellt vom Broadlink IR Manager – Änderungen bitte in der App vornehmen.",
-                "icon": button_icon(command["name"], role),
+                "icon": layout.button_icon(label, role),
                 "mode": "queued",
                 "max": 10,
                 "sequence": [
-                    {
-                        "action": "remote.send_command",
-                        "target": {"entity_id": remote_entity},
-                        "data": {"command": payload},
-                    }
+                    {"action": "remote.send_command", "target": {"entity_id": remote_entity}, "data": {"command": payload}},
+                    *_effect_actions(device["id"], layout.command_effects(device, command), helper_entities),
                 ],
             }
+    for scene in scenes:
+        sequence: List[Dict[str, Any]] = []
+        for step in scene.get("steps", []):
+            sid = known.get((step["device_id"], step["command_id"]))
+            if not sid:
+                continue
+            call = {"action": f"script.{sid}"}
+            if step.get("repeat", 1) > 1:
+                sequence.append({"repeat": {"count": step["repeat"], "sequence": [call, {"delay": {"milliseconds": 350}}]}})
+            else:
+                sequence.append(call)
+            if step.get("delay", 0) > 0:
+                sequence.append({"delay": {"milliseconds": int(step["delay"] * 1000)}})
+        if sequence:
+            scripts[scene_script_id(scene["id"])] = {
+                "alias": f"Szene: {scene['name']}",
+                "description": "Szene aus dem Broadlink IR Manager.",
+                "icon": "mdi:movie-open-play",
+                "mode": "single",
+                "sequence": sequence,
+            }
     return scripts
+
+
+# --------------------------------------------------------------------------
+# Dashboard
+# --------------------------------------------------------------------------
 
 
 def _button(entity: str, name: str, icon: str) -> Dict[str, Any]:
@@ -169,20 +178,29 @@ _BLANK = {
     "tap_action": {"action": "none"},
     "hold_action": {"action": "none"},
 }
+_FULL = {"columns": "full"}
 
 
 def _grid(cards: List[Dict[str, Any]], columns: int) -> Dict[str, Any]:
-    return {"type": "grid", "columns": columns, "square": False, "cards": cards, "grid_options": {"columns": "full"}}
+    return {"type": "grid", "columns": max(1, columns), "square": False, "cards": cards, "grid_options": _FULL}
+
+
+def _heading(text: str, style: str = "subtitle", icon: Optional[str] = None) -> Dict[str, Any]:
+    card = {"type": "heading", "heading": text, "heading_style": style, "grid_options": _FULL}
+    if icon:
+        card["icon"] = icon
+    return card
+
+
+def _status_tile(entity: str, name: str, icon: str) -> Dict[str, Any]:
+    return {"type": "tile", "entity": entity, "name": name, "icon": icon, "tap_action": {"action": "more-info"},
+            "grid_options": _FULL}
 
 
 def _color_palette_card(items: List[Tuple[str, str, str]], columns: int = 4) -> Dict[str, Any]:
-    """Coloured circles (always in colour, unlike tiles) as one picture-elements card.
-
-    items: (entity, name, palette key). A transparent SVG defines the grid size.
-    """
+    """Coloured circles (always in colour, unlike tiles) as one picture-elements card."""
     rows = (len(items) + columns - 1) // columns
-    width, cell = 400, 100
-    svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{rows * cell}'/>"
+    svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='400' height='{rows * 100}'/>"
     image = "data:image/svg+xml;base64," + base64.b64encode(svg.encode()).decode()
     elements = []
     for i, (entity, name, color_key) in enumerate(items):
@@ -201,119 +219,81 @@ def _color_palette_card(items: List[Tuple[str, str, str]], columns: int = 4) -> 
                 "filter": "drop-shadow(0 0 6px rgba(0,0,0,.5))",
             },
         })
-    return {"type": "picture-elements", "image": image, "elements": elements, "grid_options": {"columns": "full"}}
+    return {"type": "picture-elements", "image": image, "elements": elements, "grid_options": _FULL}
 
 
-def build_remote_view(device: Dict[str, Any]) -> Dict[str, Any]:
-    buttons: Dict[str, List[Dict[str, Any]]] = {}
-    commands = device.get("commands", [])
-    color_of = {c["id"]: colors.command_color(c) for c in commands}
-    is_led = device.get("icon") in ("led", "light") or sum(1 for v in color_of.values() if v) >= 3
-    color_items: List[Tuple[str, str, str]] = []
-    mode_cards: List[Dict[str, Any]] = []
-    groups: Dict[str, List[Tuple[str, Dict[str, Any]]]] = {}
-    for command in commands:
-        entity = f"script.{script_id(device['id'], command['id'])}"
-        prefix, sep, label = command["name"].partition(":")
-        if sep and prefix.strip() and label.strip():  # "Out A: HDMI 1" → own section "Out A"
-            role = button_role(label.strip())
-            groups.setdefault(prefix.strip(), []).append((role, _button(entity, label.strip(), button_icon(label.strip(), role))))
+def build_remote_view(device: Dict[str, Any], helper_entities: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    helper_entities = helper_entities or {}
+    spec = layout.device_layout(device)
+
+    def card(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not item:
+            return _BLANK
+        return _button(f"script.{script_id(device['id'], item['command_id'])}", item["label"], item["icon"])
+
+    cards: List[Dict[str, Any]] = [_heading(device["name"], "title", spec["icon"])]
+    power_entity = helper_entities.get(f"power|{device['id']}")
+    if power_entity:
+        cards.append(_status_tile(power_entity, "Status", spec["icon"]))
+
+    for section in spec["sections"]:
+        kind = section["kind"]
+        if kind == "palette":
+            cards.append(_heading(section["title"]))
+            cards.append(_color_palette_card([
+                (f"script.{script_id(device['id'], i['command_id'])}", i["label"], i["color"]) for i in section["items"]
+            ]))
             continue
-        if is_led and color_of[command["id"]]:
-            color_items.append((entity, command["name"], color_of[command["id"]]))
+        if kind == "group":
+            cards.append(_heading(section["title"]))
+            tiles = []
+            select_entity = helper_entities.get(f"select|{device['id']}|{section['group']}")
+            if select_entity:
+                tiles.append(_status_tile(select_entity, "Aktiv", "mdi:import"))
+            gpower_entity = helper_entities.get(f"gpower|{device['id']}|{section['group']}")
+            if gpower_entity:
+                tiles.append(_status_tile(gpower_entity, "Ausgang", "mdi:power"))
+            if tiles:
+                cards.append(_grid(tiles, len(tiles)))
+            if section["switch"]:
+                cards.append(_grid([card(i) for i in section["switch"]], len(section["switch"])))
+            if section["items"]:
+                cards.append(_grid([card(i) for i in section["items"]], section["columns"]))
             continue
-        if is_led and colors.is_mode(command["name"]):
-            mode_cards.append(_button(entity, command["name"], "mdi:auto-fix"))
-            continue
-        role = button_role(command["name"])
-        card = _button(f"script.{script_id(device['id'], command['id'])}", command["name"], button_icon(command["name"], role))
-        buttons.setdefault(role, []).append(card)
-
-    def take(role: str) -> Optional[Dict[str, Any]]:
-        items = buttons.get(role)
-        return items.pop(0) if items else None
-
-    cards: List[Dict[str, Any]] = [{
-        "type": "heading",
-        "heading": device["name"],
-        "icon": _DEVICE_ICONS.get(device.get("icon", ""), "mdi:remote"),
-        "heading_style": "title",
-        "grid_options": {"columns": "full"},
-    }]
-
-    top = [c for c in (take("power"), take("on"), take("off"), take("source"), take("mute")) if c]
-    top += buttons.pop("power", [])
-    if top:
-        cards.append(_grid(top, min(3, len(top))))
-
-    nav = {r: take(r) for r in ("up", "down", "left", "right", "ok")}
-    if any(nav.values()):
-        corners = [c for c in (take("menu"), take("back"), take("home"), take("exit"), take("info"), take("settings")) if c]
-        corners += [_BLANK] * 4
-        cells = [corners[0], nav["up"], corners[1], nav["left"], nav["ok"], nav["right"], corners[2], nav["down"], corners[3]]
-        cards.append(_grid([c or _BLANK for c in cells], 3))
-
-    rocker = [take("volumeUp"), take("nextChannel"), take("volumeDown"), take("previousChannel")]
-    if any(rocker):
-        if not rocker[1] and not rocker[3]:
-            cards.append(_grid([c for c in (rocker[0], rocker[2]) if c], 2))
-        elif not rocker[0] and not rocker[2]:
-            cards.append(_grid([c for c in (rocker[1], rocker[3]) if c], 2))
-        else:
-            cards.append(_grid([c or _BLANK for c in rocker], 2))
-
-    light = [c for r in ("brighten", "dim", "warmer", "colder", "night") for c in buttons.pop(r, [])]
-    if light:
-        cards.append(_grid(light, 3 if len(light) != 4 else 2))
-
-    if color_items:
-        cards.append({"type": "heading", "heading": "Farben", "heading_style": "subtitle", "grid_options": {"columns": "full"}})
-        cards.append(_color_palette_card(color_items))
-    if mode_cards:
-        cards.append({"type": "heading", "heading": "Effekte", "heading_style": "subtitle", "grid_options": {"columns": "full"}})
-        cards.append(_grid(mode_cards, 4 if len(mode_cards) >= 4 else len(mode_cards)))
-
-    media = [c for r in ("rewind", "prev", "play", "pause", "stop", "next", "forward", "record") for c in buttons.pop(r, [])]
-    if media:
-        cards.append(_grid(media, 4 if len(media) >= 4 else len(media)))
-
-    digits = buttons.pop("digit", [])
-    if digits:
-        by_digit = {re.sub(r"\D", "", c["name"])[-1:]: c for c in digits}
-        cells = [by_digit.get(str(i)) or _BLANK for i in range(1, 10)] + [_BLANK, by_digit.get("0") or _BLANK, _BLANK]
-        cards.append(_grid(cells, 3))
-
-    for title, items in groups.items():
-        cards.append({"type": "heading", "heading": title, "heading_style": "subtitle", "grid_options": {"columns": "full"}})
-        switch = [c for role, c in items if role in ("power", "on", "off")]
-        others = [c for role, c in items if role not in ("power", "on", "off")]
-        if switch:
-            cards.append(_grid(switch, len(switch)))
-        if others:
-            cards.append(_grid(others, min(4, len(others))))
-
-    sources = buttons.pop("source", [])
-    if sources:
-        cards.append({"type": "heading", "heading": "Quellen", "heading_style": "subtitle", "grid_options": {"columns": "full"}})
-        cards.append(_grid(sources, 3))
-
-    rest = [c for items in buttons.values() for c in items]
-    if rest:
-        cards.append({"type": "heading", "heading": "Weitere Tasten", "heading_style": "subtitle", "grid_options": {"columns": "full"}})
-        cards.append(_grid(rest, 3))
+        if section.get("title"):
+            cards.append(_heading(section["title"]))
+        cards.append(_grid([card(i) for i in section["items"]], section["columns"]))
 
     return {
         "title": device["name"],
-        "path": re.sub(r"[^a-z0-9-]", "-", device["id"].lower()),
-        "icon": _DEVICE_ICONS.get(device.get("icon", ""), "mdi:remote"),
+        "path": view_path(device),
+        "icon": spec["icon"],
         "type": "sections",
         "max_columns": 1,
         "sections": [{"type": "grid", "cards": cards}],
     }
 
 
-def build_dashboard(devices: List[Dict[str, Any]]) -> Dict[str, Any]:
-    views = [build_remote_view(d) for d in devices if d.get("commands")]
+def build_dashboard(devices: List[Dict[str, Any]], scenes: Optional[List[Dict[str, Any]]] = None,
+                    helper_entities: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    views = []
+    usable_scenes = [s for s in (scenes or []) if s.get("steps")]
+    if usable_scenes:
+        views.append({
+            "title": "Szenen",
+            "path": "szenen",
+            "icon": "mdi:movie-open-play",
+            "type": "sections",
+            "max_columns": 1,
+            "sections": [{"type": "grid", "cards": [
+                _heading("Szenen", "title", "mdi:movie-open-play"),
+                _grid([
+                    {**_button(f"script.{scene_script_id(s['id'])}", s["name"], "mdi:play-circle"), "icon_height": "40px"}
+                    for s in usable_scenes
+                ], 2),
+            ]}],
+        })
+    views += [build_remote_view(d, helper_entities) for d in devices if d.get("commands")]
     if not views:
         views = [{
             "title": "Fernbedienungen",
@@ -321,10 +301,6 @@ def build_dashboard(devices: List[Dict[str, Any]]) -> Dict[str, Any]:
             "cards": [{"type": "markdown", "content": "Noch keine Geräte mit Tasten. Lege im **Broadlink IR Manager** ein Gerät an."}],
         }]
     return {"title": DASHBOARD_TITLE, "views": views}
-
-
-def view_path(device: Dict[str, Any]) -> str:
-    return re.sub(r"[^a-z0-9-]", "-", device["id"].lower())
 
 
 # --------------------------------------------------------------------------
@@ -417,12 +393,15 @@ class HASync:
         self._client = HAClient()
         self._event = threading.Event()
         self._lock = threading.Lock()
+        self._file_lock = threading.Lock()
+        self._read_cache: Tuple[float, Dict[str, Any]] = (0.0, {})
         self.status: Dict[str, Any] = {
             "available": self._client.available,
             "running": False,
             "last_sync": None,
             "error": None,
             "scripts": 0,
+            "helpers": 0,
             "remote_entity": None,
             "remote_ok": None,
             "broadlink_remotes": [],
@@ -437,15 +416,24 @@ class HASync:
     # -- state file -------------------------------------------------------
 
     def _read_state(self) -> Dict[str, Any]:
-        try:
-            return json.loads(self._state_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {"scripts": {}, "dashboard": None}
+        with self._file_lock:
+            try:
+                state = json.loads(self._state_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                state = {}
+        state.setdefault("scripts", {})
+        state.setdefault("helpers", {})
+        state.setdefault("dashboard", None)
+        return state
 
     def _write_state(self, state: Dict[str, Any]) -> None:
-        tmp = self._state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=1), encoding="utf-8")
-        os.replace(tmp, self._state_file)
+        with self._file_lock:
+            tmp = self._state_file.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state, indent=1, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self._state_file)
+
+    def _helper_entities(self) -> Dict[str, str]:
+        return {k: v["entity_id"] for k, v in self._read_state()["helpers"].items()}
 
     # -- public -----------------------------------------------------------
 
@@ -459,6 +447,44 @@ class HASync:
         with self._lock:
             self._sync()
         return self.status
+
+    def push_effects(self, device_id: str, effects: List[Dict[str, Any]]) -> None:
+        """Mirror a button press from the app into the HA helpers."""
+        if not self._client.available or not effects:
+            return
+        for action in _effect_actions(device_id, effects, self._helper_entities()):
+            domain, service = action["action"].split(".", 1)
+            try:
+                self._client.rest("POST", f"services/{domain}/{service}", {**action["target"], **action.get("data", {})})
+            except HAError as err:
+                log.debug("Status nicht an HA übertragen: %s", err)
+        self._read_cache = (0.0, {})
+
+    def read_states(self, devices: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Current helper values: {device_id: {'power': bool, 'value:<group>': str, 'power:<group>': bool}}."""
+        if not self._client.available:
+            return {}
+        stamp, cached = self._read_cache
+        if time.time() - stamp < 2:
+            return cached
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, entity in self._helper_entities().items():
+            try:
+                value = self._client.rest("GET", f"states/{entity}")["state"]
+            except (HAError, KeyError, TypeError):
+                continue
+            if value in ("unknown", "unavailable"):
+                continue
+            parts = key.split("|")
+            entry = result.setdefault(parts[1], {})
+            if parts[0] == "power":
+                entry["power"] = value == "on"
+            elif parts[0] == "gpower":
+                entry[f"power:{parts[2]}"] = value == "on"
+            elif parts[0] == "select":
+                entry[f"value:{parts[2]}"] = value
+        self._read_cache = (time.time(), result)
+        return result
 
     # -- internals --------------------------------------------------------
 
@@ -486,6 +512,52 @@ class HASync:
             if e.get("platform") == "broadlink" and e["entity_id"].startswith("remote.") and not e.get("disabled_by")
         )
 
+    def _sync_helpers(self, state: Dict[str, Any], devices: List[Dict[str, Any]]) -> int:
+        """Create/update/delete the input_boolean/input_select helpers. Returns number of changes."""
+        known: Dict[str, Dict[str, Any]] = state["helpers"]
+        desired = desired_helpers(devices)
+        calls: List[Tuple[str, Optional[Dict[str, Any]], Dict[str, Any]]] = []  # (key, spec, message)
+        for key, info in list(known.items()):
+            if key not in desired or desired[key]["domain"] != info["domain"]:
+                domain = info["domain"]
+                calls.append((key, None, {"type": f"{domain}/delete", f"{domain}_id": info["id"]}))
+        for key, spec in desired.items():
+            digest = _hash(spec)
+            info = known.get(key)
+            if info and info["domain"] == spec["domain"]:
+                if info.get("hash") != digest:
+                    message = {"type": f"{spec['domain']}/update", f"{spec['domain']}_id": info["id"],
+                               "name": spec["name"], "icon": spec["icon"]}
+                    if "options" in spec:
+                        message["options"] = spec["options"]
+                    calls.append((key, spec, message))
+                continue
+            message = {"type": f"{spec['domain']}/create", "name": spec["name"], "icon": spec["icon"]}
+            if "options" in spec:
+                message["options"] = spec["options"]
+            calls.append((key, spec, message))
+        if not calls:
+            return 0
+        results = self._client.ws([c[2] for c in calls])
+        errors = []
+        for (key, spec, message), result in zip(calls, results):
+            if isinstance(result, Exception):
+                if message["type"].endswith("/delete"):
+                    known.pop(key, None)  # already gone
+                else:
+                    errors.append(str(result))
+                continue
+            if spec is None:
+                known.pop(key, None)
+            else:
+                helper_id = result.get("id") if isinstance(result, dict) else known.get(key, {}).get("id")
+                known[key] = {"domain": spec["domain"], "id": helper_id,
+                              "entity_id": f"{spec['domain']}.{helper_id}", "hash": _hash(spec)}
+        self._write_state(state)
+        if errors:
+            raise HAError("Status-Helfer: " + "; ".join(errors[:3]))
+        return len(calls)
+
     def _sync(self) -> None:
         self.status["running"] = True
         self.status["error"] = None
@@ -511,8 +583,15 @@ class HASync:
         self.status["remote_ok"] = remote in remotes
 
         state = self._read_state()
-        known: Dict[str, str] = state.get("scripts", {})
-        desired = build_scripts(data["devices"], remote)
+        try:
+            helper_changes = self._sync_helpers(state, data["devices"])
+        except HAError as err:
+            helper_changes = 0
+            problems.append(str(err))
+        helpers = {k: v["entity_id"] for k, v in state["helpers"].items()}
+
+        known: Dict[str, str] = state["scripts"]
+        desired = build_scripts(data["devices"], remote, data.get("scenes", []), helpers)
         changed = 0
         for object_id in [k for k in known if k not in desired]:
             try:
@@ -522,7 +601,7 @@ class HASync:
                     raise
             known.pop(object_id, None)
             changed += 1
-            self._write_state({**state, "scripts": known})
+            self._write_state(state)
         for object_id, config in desired.items():
             digest = _hash(config)
             if known.get(object_id) == digest:
@@ -530,7 +609,7 @@ class HASync:
             self._client.rest("POST", f"config/script/config/{object_id}", config)
             known[object_id] = digest
             changed += 1
-            self._write_state({**state, "scripts": known})
+            self._write_state(state)
 
         # Check that HA really loaded the scripts (needs `script: !include scripts.yaml`).
         if desired:
@@ -546,25 +625,27 @@ class HASync:
                 else:
                     problems.append(str(err))
 
-        dashboard = build_dashboard(data["devices"])
+        dashboard = build_dashboard(data["devices"], data.get("scenes", []), helpers)
         dash_hash = _hash(dashboard)
         try:
-            self._save_dashboard(state, dashboard, dash_hash, changed)
+            self._save_dashboard(state, dashboard, dash_hash, changed + helper_changes)
         except HAError as err:
             problems.append(f"Dashboard: {err}")
 
-        state["scripts"] = known
         self._write_state(state)
         self.status.update(
             running=False,
             last_sync=time.strftime("%Y-%m-%dT%H:%M:%S"),
             scripts=len(known),
+            helpers=len(state["helpers"]),
             error=" · ".join(problems) or None,
         )
+        self._read_cache = (0.0, {})
         if problems:
             log.warning("Home-Assistant-Abgleich unvollständig: %s", " · ".join(problems))
-        if changed:
-            log.info("Home Assistant aktualisiert: %d Skript-Änderungen, %d Skripte gesamt.", changed, len(known))
+        if changed or helper_changes:
+            log.info("Home Assistant aktualisiert: %d Skript- und %d Helfer-Änderungen (%d Skripte, %d Helfer).",
+                     changed, helper_changes, len(known), len(state["helpers"]))
 
     def _save_dashboard(self, state: Dict[str, Any], dashboard: Dict[str, Any], dash_hash: str, changed: int) -> None:
         if state.get("dashboard") != dash_hash or changed:
